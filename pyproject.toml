@@ -1,0 +1,22 @@
+[project]
+name = "livepilot"
+version = "0.1.0"
+description = "Control Ableton Live in plain language through an MCP server and a Live Remote Script"
+requires-python = ">=3.10"
+dependencies = ["mcp>=2.0,<3"]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+livepilot = "livepilot.server:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["server"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

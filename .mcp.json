@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "livepilot": {
+      "command": ".venv/Scripts/python.exe",
+      "args": ["-m", "livepilot"]
+    }
+  }
+}

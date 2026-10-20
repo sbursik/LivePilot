@@ -1,0 +1,554 @@
+"""LivePilot MCP server: exposes Ableton Live control as MCP tools.
+
+Conventions shared by every tool:
+- Indices are 0-based (track 0 is the leftmost track, slot 0 the top clip slot).
+- Times and lengths are in beats (quarter notes); one 4/4 bar = 4 beats.
+- kind selects which track list an index refers to: "track", "return", or "master".
+- MIDI pitch uses Ableton's convention: C3 = 60. Drum Rack pads start at C1 = 36.
+"""
+from typing import Any, Literal
+
+from mcp.server.mcpserver import MCPServer
+
+from . import music
+from .connection import LiveConnection
+
+TrackKind = Literal["track", "return", "master"]
+
+mcp = MCPServer("livepilot", instructions=__doc__)
+live = LiveConnection()
+
+
+def _send(command: str, **params: Any) -> Any:
+    return live.send(command, **{k: v for k, v in params.items() if v is not None})
+
+
+# ---------------------------------------------------------------- session
+
+@mcp.tool()
+def get_session_info(include_clips: bool = True) -> dict:
+    """Overview of the Live set: tempo, transport, every track (with devices and clips), returns,
+    master, scenes and locators. Call this first to orient yourself."""
+    return _send("get_session_info", include_clips=include_clips)
+
+
+@mcp.tool()
+def set_tempo(bpm: float) -> dict:
+    """Set the song tempo in BPM (20-999)."""
+    return _send("set_tempo", bpm=bpm)
+
+
+@mcp.tool()
+def set_time_signature(numerator: int, denominator: int) -> dict:
+    """Set the song time signature, e.g. 4/4, 3/4, 7/8."""
+    return _send("set_time_signature", numerator=numerator, denominator=denominator)
+
+
+@mcp.tool()
+def transport(action: Literal["play", "continue", "stop", "stop_all_clips"]) -> dict:
+    """Start playback from the start marker, continue from the current position, stop,
+    or stop all playing session clips."""
+    command = {"play": "start_playback", "continue": "continue_playback",
+               "stop": "stop_playback", "stop_all_clips": "stop_all_clips"}[action]
+    return _send(command)
+
+
+@mcp.tool()
+def set_song_time(beats: float) -> dict:
+    """Move the arrangement playhead to a position in beats."""
+    return _send("set_song_time", beats=beats)
+
+
+@mcp.tool()
+def set_metronome(enabled: bool) -> dict:
+    """Turn the metronome on or off."""
+    return _send("set_metronome", enabled=enabled)
+
+
+@mcp.tool()
+def set_arrangement_loop(start: float | None = None, length: float | None = None,
+                         enabled: bool | None = None) -> dict:
+    """Set the arrangement loop brace (start and length in beats) and/or toggle looping."""
+    return _send("set_loop", start=start, length=length, enabled=enabled)
+
+
+@mcp.tool()
+def set_recording(arrangement_record: bool | None = None, session_record: bool | None = None) -> dict:
+    """Toggle arrangement record mode and/or session record."""
+    result = {}
+    if arrangement_record is not None:
+        result.update(_send("set_record_mode", enabled=arrangement_record))
+    if session_record is not None:
+        result.update(_send("set_session_record", enabled=session_record))
+    return result
+
+
+@mcp.tool()
+def capture_midi() -> dict:
+    """Capture MIDI: turn what was recently played on armed tracks into a clip."""
+    return _send("capture_midi")
+
+
+@mcp.tool()
+def undo(steps: int = 1) -> dict:
+    """Undo the last change(s) in Live."""
+    for _ in range(steps):
+        _send("undo")
+    return {"undone": steps}
+
+
+@mcp.tool()
+def redo(steps: int = 1) -> dict:
+    """Redo previously undone change(s)."""
+    for _ in range(steps):
+        _send("redo")
+    return {"redone": steps}
+
+
+@mcp.tool()
+def show_view(view: Literal["Session", "Arranger", "Detail/Clip", "Detail/DeviceChain", "Browser"]) -> dict:
+    """Bring a view of Live's window to the front."""
+    return _send("show_view", view=view)
+
+
+# ----------------------------------------------------------------- tracks
+
+@mcp.tool()
+def get_track_info(track_index: int, kind: TrackKind = "track") -> dict:
+    """Full detail for one track: mixer, sends, devices, clip slots, arrangement clips, routing."""
+    return _send("get_track_info", track_index=track_index, kind=kind)
+
+
+@mcp.tool()
+def create_track(type: Literal["midi", "audio", "return"], name: str | None = None, index: int = -1) -> dict:
+    """Create a MIDI, audio or return track. index -1 appends at the end."""
+    if type == "return":
+        return _send("create_return_track", name=name)
+    return _send(f"create_{type}_track", index=index, name=name)
+
+
+@mcp.tool()
+def delete_track(track_index: int, kind: Literal["track", "return"] = "track") -> dict:
+    """Delete a track or return track."""
+    return _send("delete_track", track_index=track_index, kind=kind)
+
+
+@mcp.tool()
+def duplicate_track(track_index: int) -> dict:
+    """Duplicate a track (with its clips and devices); the copy lands right after it."""
+    return _send("duplicate_track", track_index=track_index)
+
+
+@mcp.tool()
+def set_track_properties(track_index: int, kind: TrackKind = "track", name: str | None = None,
+                         volume_db: float | None = None, pan: float | None = None,
+                         mute: bool | None = None, solo: bool | None = None, arm: bool | None = None,
+                         color_index: int | None = None) -> dict:
+    """Change one or more track settings. volume_db is in dB (0 = unity, max +6).
+    pan runs -1 (left) to 1 (right). color_index is Live's palette index 0-69."""
+    result: dict = {}
+    common = {"track_index": track_index, "kind": kind}
+    if name is not None:
+        result.update(_send("set_track_name", name=name, **common))
+    if volume_db is not None:
+        result.update(_send("set_track_volume", db=volume_db, **common))
+    if pan is not None:
+        result.update(_send("set_track_pan", pan=pan, **common))
+    if mute is not None:
+        result.update(_send("set_track_mute", mute=mute, **common))
+    if solo is not None:
+        result.update(_send("set_track_solo", solo=solo, **common))
+    if arm is not None:
+        result.update(_send("set_track_arm", track_index=track_index, arm=arm))
+    if color_index is not None:
+        result.update(_send("set_track_color", color_index=color_index, **common))
+    return result
+
+
+@mcp.tool()
+def set_track_send(track_index: int, send_index: int, db: float, kind: TrackKind = "track") -> dict:
+    """Set a track's send level to a return track (send 0 = return A) in dB. Use -70 or lower for off."""
+    return _send("set_track_send", track_index=track_index, send_index=send_index, db=db, kind=kind)
+
+
+@mcp.tool()
+def select_track(track_index: int, kind: TrackKind = "track") -> dict:
+    """Select a track in Live (browser loads go to the selected track)."""
+    return _send("select_track", track_index=track_index, kind=kind)
+
+
+@mcp.tool()
+def get_track_routing(track_index: int) -> dict:
+    """Show a track's current input/output routing and all available options."""
+    return _send("get_track_routing", track_index=track_index)
+
+
+@mcp.tool()
+def set_track_routing(track_index: int, input: str | None = None, input_channel: str | None = None,
+                      output: str | None = None,
+                      monitoring: Literal["in", "auto", "off"] | None = None) -> dict:
+    """Set routing by display name as Live shows it (e.g. input 'Ext. In' or another track's name,
+    output 'Master' or a group/track name). Partial names match. Call get_track_routing for options."""
+    result: dict = {}
+    if input is not None:
+        result.update(_send("set_track_input_routing", track_index=track_index, name=input,
+                            channel=input_channel))
+    if output is not None:
+        result.update(_send("set_track_output_routing", track_index=track_index, name=output))
+    if monitoring is not None:
+        result.update(_send("set_track_monitoring", track_index=track_index,
+                            state={"in": 0, "auto": 1, "off": 2}[monitoring]))
+    return result
+
+
+# ------------------------------------------------------------------ clips
+
+@mcp.tool()
+def get_clip_info(track_index: int, slot_index: int) -> dict:
+    """Clip details: length, loop and markers. For audio clips this includes the file path, gain,
+    pitch, warp mode and warp markers."""
+    return _send("get_clip_info", track_index=track_index, slot_index=slot_index)
+
+
+@mcp.tool()
+def create_clip(track_index: int, slot_index: int, length: float = 4.0, name: str | None = None) -> dict:
+    """Create an empty MIDI clip in a session slot. length is in beats (16 = 4 bars in 4/4)."""
+    return _send("create_clip", track_index=track_index, slot_index=slot_index, length=length, name=name)
+
+
+@mcp.tool()
+def create_audio_clip(track_index: int, slot_index: int, file_path: str) -> dict:
+    """Create an audio clip from a file on disk in a session slot of an audio track."""
+    return _send("create_audio_clip", track_index=track_index, slot_index=slot_index, file_path=file_path)
+
+
+@mcp.tool()
+def delete_clip(track_index: int, slot_index: int) -> dict:
+    """Delete the clip in a session slot."""
+    return _send("delete_clip", track_index=track_index, slot_index=slot_index)
+
+
+@mcp.tool()
+def duplicate_clip(track_index: int, slot_index: int, target_track_index: int | None = None,
+                   target_slot_index: int | None = None) -> dict:
+    """Copy a clip. Without a target, it duplicates into the next free slot below (like Ctrl+D)."""
+    if target_track_index is None or target_slot_index is None:
+        return _send("duplicate_clip_slot", track_index=track_index, slot_index=slot_index)
+    return _send("copy_clip", track_index=track_index, slot_index=slot_index,
+                 target_track_index=target_track_index, target_slot_index=target_slot_index)
+
+
+@mcp.tool()
+def set_clip_properties(track_index: int, slot_index: int, name: str | None = None,
+                        color_index: int | None = None, looping: bool | None = None,
+                        loop_start: float | None = None, loop_end: float | None = None,
+                        start_marker: float | None = None, end_marker: float | None = None) -> dict:
+    """Rename or recolor a clip and set its loop region and markers (in beats)."""
+    result: dict = {}
+    if name is not None:
+        result.update(_send("set_clip_name", track_index=track_index, slot_index=slot_index, name=name))
+    if color_index is not None:
+        result.update(_send("set_clip_color", track_index=track_index, slot_index=slot_index,
+                            color_index=color_index))
+    if any(v is not None for v in (looping, loop_start, loop_end, start_marker, end_marker)):
+        result.update(_send("set_clip_loop", track_index=track_index, slot_index=slot_index,
+                            looping=looping, loop_start=loop_start, loop_end=loop_end,
+                            start_marker=start_marker, end_marker=end_marker))
+    return result
+
+
+@mcp.tool()
+def set_audio_clip_properties(track_index: int, slot_index: int, gain: float | None = None,
+                              transpose_semitones: int | None = None, detune_cents: float | None = None,
+                              warping: bool | None = None,
+                              warp_mode: Literal["beats", "tones", "texture", "repitch", "complex",
+                                                 "complex_pro"] | None = None) -> dict:
+    """Adjust an audio clip: gain (0..1 slider position, ~0.4 = 0 dB), pitch, warping and warp mode."""
+    modes = {"beats": 0, "tones": 1, "texture": 2, "repitch": 3, "complex": 4, "complex_pro": 6}
+    return _send("set_audio_clip_properties", track_index=track_index, slot_index=slot_index, gain=gain,
+                 pitch_coarse=transpose_semitones, pitch_fine=detune_cents, warping=warping,
+                 warp_mode=modes[warp_mode] if warp_mode else None)
+
+
+@mcp.tool()
+def launch(target: Literal["clip", "scene", "stop_clip", "stop_track"], track_index: int | None = None,
+           slot_index: int | None = None, scene_index: int | None = None) -> dict:
+    """Launch a clip or scene, or stop a clip slot or a whole track's clips."""
+    if target == "clip":
+        return _send("fire_clip", track_index=track_index, slot_index=slot_index)
+    if target == "stop_clip":
+        return _send("stop_clip", track_index=track_index, slot_index=slot_index)
+    if target == "stop_track":
+        return _send("stop_track_clips", track_index=track_index)
+    return _send("fire_scene", scene_index=scene_index)
+
+
+@mcp.tool()
+def duplicate_clip_loop(track_index: int, slot_index: int) -> dict:
+    """Double a MIDI clip's loop, copying its notes into the new half."""
+    return _send("duplicate_clip_loop", track_index=track_index, slot_index=slot_index)
+
+
+# ------------------------------------------------------------------ notes
+
+@mcp.tool()
+def get_notes(track_index: int, slot_index: int) -> dict:
+    """Read all MIDI notes in a clip: pitch, start, duration, velocity, mute, probability."""
+    return _send("get_notes", track_index=track_index, slot_index=slot_index)
+
+
+@mcp.tool()
+def add_notes(track_index: int, slot_index: int, notes: list[dict], replace: bool = False) -> dict:
+    """Write MIDI notes into a clip. Each note: {"pitch": 60, "start": 0.0, "duration": 0.5,
+    "velocity": 100, "mute": false, "probability": 1.0}. Times are in beats.
+    replace=True clears the clip first."""
+    return _send("add_notes", track_index=track_index, slot_index=slot_index, notes=notes, replace=replace)
+
+
+@mcp.tool()
+def remove_notes(track_index: int, slot_index: int, from_pitch: int = 0, pitch_span: int = 128,
+                 from_time: float = 0.0, time_span: float | None = None) -> dict:
+    """Delete notes in a pitch/time range (defaults to every note in the clip)."""
+    return _send("remove_notes", track_index=track_index, slot_index=slot_index, from_pitch=from_pitch,
+                 pitch_span=pitch_span, from_time=from_time, time_span=time_span)
+
+
+@mcp.tool()
+def edit_notes(track_index: int, slot_index: int,
+               operation: Literal["quantize", "humanize", "transpose", "velocity"],
+               pitch: int | None = None, grid: float = 0.25, amount: float = 1.0,
+               quantize_ends: bool = False, timing: float = 0.01, velocity_range: float = 8,
+               semitones: int = 0, velocity_factor: float = 1.0, velocity_offset: float = 0.0,
+               seed: int | None = None) -> dict:
+    """Process existing notes; pitch limits the edit to one note number (e.g. only hats).
+    - quantize: snap to grid (beats: 0.25 = 1/16, 0.5 = 1/8, 1/3 = 1/8 triplet) by amount 0..1.
+    - humanize: random timing shift up to `timing` beats, velocity by up to `velocity_range`.
+    - transpose: shift by `semitones`.
+    - velocity: new = old * velocity_factor + velocity_offset."""
+    base = {"track_index": track_index, "slot_index": slot_index, "pitch": pitch}
+    if operation == "quantize":
+        return _send("quantize_notes", grid=grid, amount=amount, quantize_ends=quantize_ends, **base)
+    if operation == "humanize":
+        return _send("humanize_notes", timing=timing, velocity=velocity_range, seed=seed, **base)
+    if operation == "transpose":
+        return _send("transpose_notes", semitones=semitones, **base)
+    return _send("scale_velocity", factor=velocity_factor, offset=velocity_offset, **base)
+
+
+# -------------------------------------------------------------- generators
+
+def _write_generated(track_index: int, slot_index: int, notes: list[dict], length: float, name: str) -> dict:
+    info = _send("get_track_info", track_index=track_index)
+    slot = info["clip_slots"][slot_index]
+    if not slot["has_clip"]:
+        _send("create_clip", track_index=track_index, slot_index=slot_index, length=length, name=name)
+    elif slot["clip"]["length"] < length:
+        _send("set_clip_loop", track_index=track_index, slot_index=slot_index, loop_end=length,
+              end_marker=length)
+    result = _send("add_notes", track_index=track_index, slot_index=slot_index, notes=notes, replace=True)
+    result["notes"] = len(notes)
+    return result
+
+
+@mcp.tool()
+def generate_drum_pattern(track_index: int, slot_index: int,
+                          style: Literal[tuple(sorted(music.DRUM_STYLES))] = "house",  # type: ignore[valid-type]
+                          bars: int = 1, swing: float = 0.0, fill: bool = False,
+                          seed: int | None = None) -> dict:
+    """Write a drum pattern into a clip (creating it if needed) on a track with a Drum Rack.
+    Uses standard pads: kick 36, rim 37, snare 38, clap 39, closed hat 42, open hat 46.
+    swing 0..1. fill adds a snare roll at the end of the last bar. Replaces existing notes."""
+    notes = music.drum_pattern(style, bars, swing, fill, seed)
+    return _write_generated(track_index, slot_index, notes, bars * 4.0, f"{style} drums")
+
+
+@mcp.tool()
+def generate_bassline(track_index: int, slot_index: int, root: str = "A", scale: str = "minor",
+                      bars: int = 2, octave: int = 1,
+                      style: Literal["offbeat", "rolling", "root_eighths", "walking", "syncopated"] = "offbeat",
+                      progression: list[int] | None = None, seed: int | None = None) -> dict:
+    """Write a bassline into a clip. progression lists 1-based scale degrees, one per bar,
+    e.g. [1, 6, 4, 5]. octave 1 means C1 = 36. Replaces existing notes."""
+    notes = music.bassline(root, scale, bars, octave, style, progression, seed)
+    return _write_generated(track_index, slot_index, notes, bars * 4.0, f"{root} {scale} bass")
+
+
+@mcp.tool()
+def generate_chords(track_index: int, slot_index: int, root: str = "C", scale: str = "minor",
+                    degrees: list[int] | None = None, beats_per_chord: float = 4.0, octave: int = 3,
+                    sevenths: bool = False, velocity: int = 90) -> dict:
+    """Write a diatonic chord progression into a clip. degrees are 1-based scale degrees,
+    e.g. [1, 6, 3, 7]. Replaces existing notes."""
+    degrees = degrees or [1, 6, 3, 7]
+    notes = music.chord_progression(root, scale, degrees, beats_per_chord, octave, sevenths, velocity)
+    return _write_generated(track_index, slot_index, notes, len(degrees) * beats_per_chord,
+                            f"{root} {scale} chords")
+
+
+@mcp.tool()
+def scale_notes(root: str, scale: str = "minor", octave: int = 3, octaves: int = 1) -> dict:
+    """Return MIDI note numbers for a scale (C3 = 60). Scales: major, minor, harmonic_minor,
+    dorian, phrygian, lydian, mixolydian, pentatonic_major, pentatonic_minor, blues."""
+    return {"pitches": music.scale_pitches(root, scale, octave, octaves)}
+
+
+# ----------------------------------------------------------------- scenes
+
+@mcp.tool()
+def manage_scene(action: Literal["create", "delete", "duplicate", "rename", "fire"],
+                 scene_index: int = -1, name: str | None = None) -> dict:
+    """Create (scene_index -1 appends), delete, duplicate, rename or fire a scene."""
+    if action == "create":
+        return _send("create_scene", index=scene_index, name=name)
+    if action == "rename":
+        return _send("set_scene_name", scene_index=scene_index, name=name)
+    return _send(f"{action}_scene", scene_index=scene_index)
+
+
+# ---------------------------------------------------------------- devices
+
+@mcp.tool()
+def get_devices(track_index: int, kind: TrackKind = "track") -> list:
+    """List the devices on a track, including rack chains and loaded Drum Rack pads."""
+    return _send("get_devices", track_index=track_index, kind=kind)
+
+
+@mcp.tool()
+def get_device_parameters(track_index: int, device_index: int, kind: TrackKind = "track") -> dict:
+    """List a device's parameters with their index, current value, range and displayed value."""
+    return _send("get_device_parameters", track_index=track_index, device_index=device_index, kind=kind)
+
+
+@mcp.tool()
+def set_device_parameter(track_index: int, device_index: int, parameter: int | str,
+                         value: float | None = None, display_value: str | None = None,
+                         kind: TrackKind = "track") -> dict:
+    """Set a device parameter by index or name. value is the raw value (check min/max with
+    get_device_parameters). For switch/menu parameters you can pass display_value (e.g. 'On')."""
+    return _send("set_device_parameter", track_index=track_index, device_index=device_index,
+                 parameter=parameter, value=value, display_value=display_value, kind=kind)
+
+
+@mcp.tool()
+def set_device_on(track_index: int, device_index: int, on: bool, kind: TrackKind = "track") -> dict:
+    """Turn a device on or off (bypass)."""
+    return _send("set_device_active", track_index=track_index, device_index=device_index, active=on, kind=kind)
+
+
+@mcp.tool()
+def delete_device(track_index: int, device_index: int, kind: TrackKind = "track") -> dict:
+    """Remove a device from a track."""
+    return _send("delete_device", track_index=track_index, device_index=device_index, kind=kind)
+
+
+@mcp.tool()
+def set_sidechain(track_index: int, device_index: int, source: str, enabled: bool = True) -> dict:
+    """Point a Compressor/Gate's sidechain at another track (by its name as shown in Live),
+    e.g. side-chain the bass compressor to the kick."""
+    return _send("set_compressor_sidechain", track_index=track_index, device_index=device_index,
+                 source=source, enabled=enabled)
+
+
+# ---------------------------------------------------------------- browser
+
+@mcp.tool()
+def search_browser(query: str, category: Literal["all", "instruments", "audio_effects", "midi_effects",
+                                                 "drums", "sounds", "samples", "clips", "plugins",
+                                                 "max_for_live", "user_library", "packs"] = "all",
+                   max_results: int = 25) -> dict:
+    """Search Live's browser for loadable items by name (all words must match). Narrowing the
+    category is much faster. Returns uris for load_browser_item."""
+    return _send("search_browser", query=query, category=category, max_results=max_results)
+
+
+@mcp.tool()
+def browse(category: Literal["instruments", "audio_effects", "midi_effects", "drums", "sounds", "samples",
+                             "clips", "plugins", "max_for_live", "user_library", "packs",
+                             "current_project"],
+           path: str = "") -> list:
+    """List one folder of Live's browser. path is '/'-separated folder names, e.g. 'Drum Rack'
+    under drums, or '' for the top level."""
+    return _send("browse", category=category, path=path)
+
+
+@mcp.tool()
+def load_browser_item(uri: str, track_index: int | None = None, kind: TrackKind = "track") -> dict:
+    """Load a browser item (instrument, effect, preset, drum kit, sample) onto a track.
+    Get the uri from search_browser or browse. Effects are added after the existing devices."""
+    return _send("load_browser_item", uri=uri, track_index=track_index, kind=kind)
+
+
+@mcp.tool()
+def load_device_by_name(name: str, track_index: int,
+                        category: Literal["instruments", "audio_effects", "midi_effects", "drums",
+                                          "sounds", "plugins"] = "audio_effects",
+                        kind: TrackKind = "track") -> dict:
+    """Search for a device or preset by name and load the best match onto a track
+    (e.g. 'EQ Eight', 'Compressor', 'Reverb', 'Operator', '808 Core Kit')."""
+    found = _send("search_browser", query=name, category=category, max_results=50)["results"]
+    if not found:
+        return {"error": f"nothing named {name!r} in {category}"}
+    exact = [r for r in found if r["name"].lower().removesuffix(".adg").removesuffix(".adv") == name.lower()]
+    devices = [r for r in found if r["is_device"]]
+    pick = (exact or devices or found)[0]
+    return _send("load_browser_item", uri=pick["uri"], track_index=track_index, kind=kind)
+
+
+# ------------------------------------------------------------ arrangement
+
+@mcp.tool()
+def manage_locator(action: Literal["list", "add", "delete", "jump"], time: float | None = None,
+                   name: str | None = None, index: int | None = None) -> Any:
+    """Arrangement locators: list them, add one at `time` (beats) with an optional name
+    (e.g. 'Intro', 'Drop'), delete one by index, or jump the playhead to one."""
+    if action == "list":
+        return _send("get_locators")
+    if action == "add":
+        return _send("add_locator", time=time, name=name)
+    if action == "delete":
+        return _send("delete_locator", index=index)
+    return _send("jump_to_locator", index=index)
+
+
+@mcp.tool()
+def place_clip_in_arrangement(track_index: int, slot_index: int, time: float, repeats: int = 1) -> dict:
+    """Copy a session clip into the arrangement at `time` (beats), back to back `repeats` times.
+    Use this to build sections: e.g. bars 1-16 intro = time 0 to 64."""
+    info = _send("get_clip_info", track_index=track_index, slot_index=slot_index)
+    length = info["loop_end"] - info["loop_start"] if info["looping"] else info["length"]
+    for i in range(repeats):
+        _send("duplicate_clip_to_arrangement", track_index=track_index, slot_index=slot_index,
+              time=time + i * length)
+    return {"placed": repeats, "start": time, "end": time + repeats * length}
+
+
+@mcp.tool()
+def create_arrangement_clip(track_index: int, start: float, length: float) -> dict:
+    """Create an empty MIDI clip directly in the arrangement (Live 12.1+)."""
+    return _send("create_arrangement_midi_clip", track_index=track_index, start=start, length=length)
+
+
+@mcp.tool()
+def delete_arrangement_clip(track_index: int, clip_index: int) -> dict:
+    """Delete an arrangement clip by its index in get_track_info's arrangement_clips list."""
+    return _send("delete_arrangement_clip", track_index=track_index, clip_index=clip_index)
+
+
+@mcp.tool()
+def back_to_arrangement() -> dict:
+    """Press 'Back to Arrangement' so the arrangement plays instead of session clips."""
+    return _send("back_to_arrangement")
+
+
+@mcp.tool()
+def raw_command(command: str, params: dict | None = None) -> Any:
+    """Escape hatch: send any Remote Script command directly. Use 'list_commands' to see all."""
+    return live.send(command, **(params or {}))
+
+
+def main() -> None:
+    mcp.run()
+
+
+if __name__ == "__main__":
+    main()
