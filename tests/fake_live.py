@@ -105,6 +105,9 @@ class FakeSong:
         self.master_track = FakeTrack("Master")
         self.scenes = [types.SimpleNamespace(name="") for _ in range(8)]
         self.cue_points = []
+        self.root_note, self.scale_name, self.scale_mode = 0, "Major", False
+        self.scale_intervals = [0, 2, 4, 5, 7, 9, 11]
+        self.view = types.SimpleNamespace(selected_track=self.tracks[0])
 
     def create_midi_track(self, index):
         t = FakeTrack("%d-MIDI" % (len(self.tracks) + 1))
@@ -141,11 +144,41 @@ class FakeControlSurface:
         pass
 
 
+class FakeItem:
+    def __init__(self, name, children=(), loadable=True, device=False):
+        self.name, self.uri = name, "query:" + name
+        self.children = list(children)
+        self.is_folder = bool(children)
+        self.is_loadable = loadable and not children
+        self.is_device = device
+
+
+def fake_browser(samples=40000):
+    serum = FakeItem("Serum 2", device=True)
+    return types.SimpleNamespace(
+        instruments=FakeItem("Instruments", [FakeItem("Operator", device=True), FakeItem("Wavetable", device=True)]),
+        audio_effects=FakeItem("Audio Effects", [FakeItem("EQ Eight", device=True)]),
+        midi_effects=FakeItem("MIDI Effects", [FakeItem("Arpeggiator", device=True)]),
+        drums=FakeItem("Drums", [FakeItem("808 Core Kit.adg")]),
+        sounds=FakeItem("Sounds", [FakeItem("Serum Bass Lead.adv")]),
+        # Big enough to exhaust a shared search budget, like a real sample library.
+        samples=FakeItem("Samples", [FakeItem("Kick %d.wav" % i) for i in range(samples)]),
+        clips=FakeItem("Clips", []),
+        plugins=FakeItem("Plug-Ins", [FakeItem("VST3", [FakeItem("Xfer Records", [serum])])]),
+        max_for_live=FakeItem("Max for Live", []),
+        user_library=FakeItem("User Library", []),
+        packs=FakeItem("Packs", []),
+        current_project=FakeItem("Current Project", []),
+        loaded=[],
+        load_item=lambda item: None,
+    )
+
+
 def install():
     live = types.ModuleType("Live")
     live.Clip = types.SimpleNamespace(MidiNoteSpecification=lambda **kw: types.SimpleNamespace(**kw))
     app = types.SimpleNamespace(get_major_version=lambda: 12, get_minor_version=lambda: 2,
-                                get_bugfix_version=lambda: 0)
+                                get_bugfix_version=lambda: 0, browser=fake_browser())
     live.Application = types.SimpleNamespace(get_application=lambda: app)
     sys.modules["Live"] = live
 

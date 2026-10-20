@@ -5,6 +5,16 @@ Conventions shared by every tool:
 - Times and lengths are in beats (quarter notes); one 4/4 bar = 4 beats.
 - kind selects which track list an index refers to: "track", "return", or "master".
 - MIDI pitch uses Ableton's convention: C3 = 60. Drum Rack pads start at C1 = 36.
+
+Working style:
+- When the user names a key, set it on the Live set with set_song_key before writing music.
+  The generators default to the set's key.
+- When the user names an instrument or plugin (e.g. Serum 2), load exactly that with
+  load_device_by_name. Never substitute a default Live device without saying so.
+- Generators give a starting point. Shape the result with add_notes and edit_notes (vary bars,
+  add ghost notes, adjust velocities) instead of leaving raw patterns.
+- Plugin parameters are only reachable if Live exposes them (get_device_parameters). For big
+  synths like Serum, Live shows parameters only after the user adds them with Configure.
 """
 from typing import Any, Literal
 
@@ -42,6 +52,17 @@ def set_tempo(bpm: float) -> dict:
 def set_time_signature(numerator: int, denominator: int) -> dict:
     """Set the song time signature, e.g. 4/4, 3/4, 7/8."""
     return _send("set_time_signature", numerator=numerator, denominator=denominator)
+
+
+@mcp.tool()
+def set_song_key(root: str, scale: str = "minor", scale_mode: bool = True) -> dict:
+    """Set the Live set's key (Live 12+), e.g. root 'F', scale 'minor'. Call this whenever the user
+    names a key. scale_mode highlights the scale in clips and keeps Live's MIDI tools in key.
+    scale: major, minor, dorian, phrygian, lydian, mixolydian, harmonic_minor, pentatonic_major,
+    pentatonic_minor, blues, or any scale name exactly as Live shows it."""
+    live_scale = music.SCALE_TO_LIVE.get(scale.lower().replace(" ", "_"), scale)
+    root_note = music.note_number(root, 0) % 12
+    return _send("set_song_key", root_note=root_note, scale_name=live_scale, scale_mode=scale_mode)
 
 
 @mcp.tool()
@@ -350,37 +371,53 @@ def _write_generated(track_index: int, slot_index: int, notes: list[dict], lengt
     return result
 
 
+def _resolve_key(root: str | None, scale: str | None) -> tuple[str, str]:
+    """Fill in a missing root/scale from the Live set's key (Live 12), else A minor."""
+    if root and scale:
+        return root, scale
+    key = _send("get_session_info", include_clips=False).get("key") or {}
+    song_scale = music.LIVE_SCALES.get(key.get("scale", ""), "minor")
+    return root or key.get("root", "A"), scale or song_scale
+
+
 @mcp.tool()
 def generate_drum_pattern(track_index: int, slot_index: int,
                           style: Literal[tuple(sorted(music.DRUM_STYLES))] = "house",  # type: ignore[valid-type]
-                          bars: int = 1, swing: float = 0.0, fill: bool = False,
+                          bars: int = 2, swing: float = 0.0, fill: bool = False, variation: float = 0.3,
                           seed: int | None = None) -> dict:
     """Write a drum pattern into a clip (creating it if needed) on a track with a Drum Rack.
-    Uses standard pads: kick 36, rim 37, snare 38, clap 39, closed hat 42, open hat 46.
-    swing 0..1. fill adds a snare roll at the end of the last bar. Replaces existing notes."""
-    notes = music.drum_pattern(style, bars, swing, fill, seed)
+    Uses standard pads: kick 36, rim 37, snare 38, clap 39, closed hat 42, open hat 46, shaker 70.
+    swing 0..1 (tech house sits around 0.2-0.4). variation 0..1 changes hats and percussion
+    between bars. fill adds a roll at the end of the last bar. Replaces existing notes."""
+    notes = music.drum_pattern(style, bars, swing, fill, variation, seed)
     return _write_generated(track_index, slot_index, notes, bars * 4.0, f"{style} drums")
 
 
 @mcp.tool()
-def generate_bassline(track_index: int, slot_index: int, root: str = "A", scale: str = "minor",
+def generate_bassline(track_index: int, slot_index: int, root: str | None = None, scale: str | None = None,
                       bars: int = 2, octave: int = 1,
-                      style: Literal["offbeat", "rolling", "root_eighths", "walking", "syncopated"] = "offbeat",
+                      style: Literal["offbeat", "rolling", "root_eighths", "walking", "tech_house",
+                                     "syncopated"] = "offbeat",
                       progression: list[int] | None = None, seed: int | None = None) -> dict:
-    """Write a bassline into a clip. progression lists 1-based scale degrees, one per bar,
-    e.g. [1, 6, 4, 5]. octave 1 means C1 = 36. Replaces existing notes."""
+    """Write a bassline into a clip. root/scale default to the Live set's key. progression lists
+    1-based scale degrees, one per bar, e.g. [1, 6, 4, 5]. octave 1 means C1 = 36.
+    Replaces existing notes."""
+    root, scale = _resolve_key(root, scale)
     notes = music.bassline(root, scale, bars, octave, style, progression, seed)
     return _write_generated(track_index, slot_index, notes, bars * 4.0, f"{root} {scale} bass")
 
 
 @mcp.tool()
-def generate_chords(track_index: int, slot_index: int, root: str = "C", scale: str = "minor",
+def generate_chords(track_index: int, slot_index: int, root: str | None = None, scale: str | None = None,
                     degrees: list[int] | None = None, beats_per_chord: float = 4.0, octave: int = 3,
-                    sevenths: bool = False, velocity: int = 90) -> dict:
-    """Write a diatonic chord progression into a clip. degrees are 1-based scale degrees,
-    e.g. [1, 6, 3, 7]. Replaces existing notes."""
+                    sevenths: bool = False, velocity: int = 90,
+                    rhythm: Literal["sustained", "stabs", "offbeat_stabs", "pulse"] = "sustained") -> dict:
+    """Write a diatonic chord progression into a clip. root/scale default to the Live set's key.
+    degrees are 1-based scale degrees, e.g. [1, 6, 3, 7]. rhythm: sustained pads, offbeat stabs,
+    syncopated offbeat_stabs (tech house), or 8th-note pulse. Replaces existing notes."""
+    root, scale = _resolve_key(root, scale)
     degrees = degrees or [1, 6, 3, 7]
-    notes = music.chord_progression(root, scale, degrees, beats_per_chord, octave, sevenths, velocity)
+    notes = music.chord_progression(root, scale, degrees, beats_per_chord, octave, sevenths, velocity, rhythm)
     return _write_generated(track_index, slot_index, notes, len(degrees) * beats_per_chord,
                             f"{root} {scale} chords")
 
@@ -478,20 +515,50 @@ def load_browser_item(uri: str, track_index: int | None = None, kind: TrackKind 
     return _send("load_browser_item", uri=uri, track_index=track_index, kind=kind)
 
 
+_LOAD_ORDER = {
+    "instrument": ["plugins", "instruments", "sounds", "drums", "user_library"],
+    "audio_effect": ["audio_effects", "plugins", "user_library"],
+    "midi_effect": ["midi_effects", "plugins", "user_library"],
+    "any": ["all"],
+}
+
+
 @mcp.tool()
 def load_device_by_name(name: str, track_index: int,
-                        category: Literal["instruments", "audio_effects", "midi_effects", "drums",
-                                          "sounds", "plugins"] = "audio_effects",
+                        type: Literal["instrument", "audio_effect", "midi_effect", "any"] = "any",
                         kind: TrackKind = "track") -> dict:
-    """Search for a device or preset by name and load the best match onto a track
-    (e.g. 'EQ Eight', 'Compressor', 'Reverb', 'Operator', '808 Core Kit')."""
-    found = _send("search_browser", query=name, category=category, max_results=50)["results"]
+    """Find a device, plugin or preset by name and load the best match onto a track. Works for
+    Live devices ('Operator', 'EQ Eight', 'Compressor'), presets and kits ('808 Core Kit'), and
+    third-party plugins ('Serum 2', 'Diva', 'Pro-Q 3'). When the user names a plugin, always load
+    it with this tool rather than substituting a Live instrument. If nothing matches, report that
+    instead of loading something else."""
+    found: list[dict] = []
+    for category in _LOAD_ORDER[type]:
+        found = _send("search_browser", query=name, category=category, max_results=10)["results"]
+        if found and found[0]["rank"] == 0:
+            break
     if not found:
-        return {"error": f"nothing named {name!r} in {category}"}
-    exact = [r for r in found if r["name"].lower().removesuffix(".adg").removesuffix(".adv") == name.lower()]
-    devices = [r for r in found if r["is_device"]]
-    pick = (exact or devices or found)[0]
-    return _send("load_browser_item", uri=pick["uri"], track_index=track_index, kind=kind)
+        return {"error": f"nothing named {name!r} found in Live's browser. If it's a plugin, check it "
+                         "is installed and enabled under Settings > Plug-Ins and rescan."}
+    pick = found[0]
+    result = _send("load_browser_item", uri=pick["uri"], track_index=track_index, kind=kind)
+    result["matched"] = pick["name"]
+    if pick["rank"] != 0:
+        result["note"] = f"no exact match for {name!r}; loaded closest: {pick['name']}"
+    return result
+
+
+@mcp.tool()
+def plugin_presets(track_index: int, device_index: int, select_index: int | None = None,
+                   select_name: str | None = None, kind: TrackKind = "track") -> dict:
+    """List or switch the presets (programs) a third-party plugin reports to Live. Many modern
+    plugins, Serum 2 included, manage presets in their own browser and report none here. In that
+    case, suggest the user saves favourite sounds as Live presets (the save icon in the device
+    title bar), which makes them loadable by name with load_device_by_name."""
+    if select_index is None and select_name is None:
+        return _send("get_plugin_presets", track_index=track_index, device_index=device_index, kind=kind)
+    return _send("set_plugin_preset", track_index=track_index, device_index=device_index,
+                 index=select_index, name=select_name, kind=kind)
 
 
 # ------------------------------------------------------------ arrangement

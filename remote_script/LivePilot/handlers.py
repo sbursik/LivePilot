@@ -9,6 +9,7 @@ import re
 import Live
 
 TRACK_KINDS = ("track", "return", "master")
+_EXT_RE = re.compile(r"\.(adg|adv|amxd|alc|als|vst3|vst|component|dll|wav|aif|aiff|mp3|flac|ogg)$")
 _DB_RE = re.compile(r"(-?inf|-?\d+(?:\.\d+)?)\s*dB", re.IGNORECASE)
 
 
@@ -191,6 +192,7 @@ class Handlers(object):
             "song_time": song.current_song_time,
             "loop": {"enabled": song.loop, "start": song.loop_start, "length": song.loop_length},
             "metronome": song.metronome,
+            "key": self._key_info(),
             "tracks": tracks,
             "return_tracks": [
                 {"index": i, "name": t.name,
@@ -210,6 +212,34 @@ class Handlers(object):
     def cmd_set_tempo(self, bpm):
         self.song.tempo = max(20.0, min(999.0, float(bpm)))
         return {"tempo": self.song.tempo}
+
+    _NOTE_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+
+    def _key_info(self):
+        song = self.song
+        if not hasattr(song, "root_note"):
+            return None  # Live 11 has no song-level key
+        return {"root": self._NOTE_NAMES[song.root_note], "root_note": song.root_note,
+                "scale": song.scale_name, "scale_mode": song.scale_mode,
+                "intervals": list(song.scale_intervals)}
+
+    def cmd_set_song_key(self, root_note=None, scale_name=None, scale_mode=None):
+        """root_note: 0-11 (C=0). scale_name: Live's name, e.g. 'Major', 'Minor', 'Dorian'.
+        scale_mode: highlight the scale in clips and keep MIDI devices in key."""
+        song = self.song
+        if not hasattr(song, "root_note"):
+            raise CommandError("song key needs Live 12 or later")
+        if root_note is not None:
+            song.root_note = int(root_note) % 12
+        if scale_name is not None:
+            previous = song.scale_name
+            song.scale_name = scale_name
+            if song.scale_name != scale_name:
+                song.scale_name = previous
+                raise CommandError("Live did not accept scale %r" % scale_name)
+        if scale_mode is not None:
+            song.scale_mode = bool(scale_mode)
+        return self._key_info()
 
     def cmd_set_time_signature(self, numerator, denominator):
         self.song.signature_numerator = int(numerator)
@@ -761,6 +791,32 @@ class Handlers(object):
         t.delete_device(device_index)
         return {"deleted": name}
 
+    def _plugin(self, track_index, device_index, kind):
+        d = self._device(track_index, device_index, kind)
+        if not hasattr(d, "presets"):
+            raise CommandError("%s is not a plugin device" % d.name)
+        return d
+
+    def cmd_get_plugin_presets(self, track_index, device_index, kind="track"):
+        """Programs the plugin reports to Live. Many modern plugins (Serum included) report few or
+        none, because they manage presets in their own browser."""
+        d = self._plugin(track_index, device_index, kind)
+        return {"device": d.name, "selected_index": d.selected_preset_index,
+                "presets": list(d.presets), "exposed_parameters": len(d.parameters) - 1}
+
+    def cmd_set_plugin_preset(self, track_index, device_index, index=None, name=None, kind="track"):
+        d = self._plugin(track_index, device_index, kind)
+        presets = list(d.presets)
+        if name is not None:
+            matches = [i for i, p in enumerate(presets) if name.lower() in p.lower()]
+            if not matches:
+                raise CommandError("no plugin preset matching %r" % name)
+            index = matches[0]
+        if index is None or not 0 <= index < len(presets):
+            raise CommandError("preset index out of range (%d presets)" % len(presets))
+        d.selected_preset_index = int(index)
+        return {"selected": presets[index], "index": index}
+
     def cmd_set_compressor_sidechain(self, track_index, device_index, source, enabled=True, kind="track"):
         """Route a Compressor/Gate sidechain input to `source` (a track name as shown in Live)."""
         d = self._device(track_index, device_index, kind)
@@ -801,27 +857,54 @@ class Handlers(object):
             node = match[0]
         return [self._remember(c) for c in node.children]
 
-    def cmd_search_browser(self, query, category="all", max_results=25, max_nodes=30000):
-        terms = query.lower().split()
-        roots = self._BROWSER_ROOTS[:-1] if category == "all" else (category,)
+    # Searched by category="all", most useful first. Samples and clips are huge and only
+    # searched when asked for, so they can't use up the budget before plugins are reached.
+    _SEARCH_ORDER = ("plugins", "instruments", "audio_effects", "midi_effects", "drums", "sounds",
+                     "max_for_live", "user_library", "packs")
+
+    @staticmethod
+    def _match_rank(name, query):
+        """0 = exact, 1 = prefix, 2 = all words present, None = no match. Ignores case,
+        spaces and file extensions, so 'serum 2' matches 'Serum2.vst3'."""
+        base = _EXT_RE.sub("", name.lower())
+        squashed, q = base.replace(" ", ""), query.lower().replace(" ", "")
+        if squashed == q:
+            return 0
+        if squashed.startswith(q):
+            return 1
+        if all(t in base for t in query.lower().split()) or q in squashed:
+            return 2
+        return None
+
+    def cmd_search_browser(self, query, category="all", max_results=25, max_nodes_per_category=15000):
+        roots = self._SEARCH_ORDER if category == "all" else (category,)
         results = []
-        visited = 0
+        truncated = []
         for r in roots:
             try:
                 stack = [self._root(r)]
             except CommandError:
                 continue
-            while stack and len(results) < max_results and visited < max_nodes:
+            visited = 0
+            while stack and visited < max_nodes_per_category:
                 node = stack.pop()
                 visited += 1
-                name = node.name.lower()
-                if node.is_loadable and all(t in name for t in terms):
-                    info = self._remember(node)
-                    info["category"] = r
-                    results.append(info)
-                if node.is_folder or node.children:
-                    stack.extend(reversed(list(node.children)))
-        return {"results": results, "nodes_searched": visited, "truncated": visited >= max_nodes}
+                if node.is_loadable:
+                    rank = self._match_rank(node.name, query)
+                    if rank is not None:
+                        info = self._remember(node)
+                        info["category"] = r
+                        info["rank"] = rank
+                        results.append(info)
+                children = node.children
+                if children:
+                    stack.extend(reversed(list(children)))
+            if stack:
+                truncated.append(r)
+        # Exact matches first, then devices (instruments/plugins) before presets and samples.
+        results.sort(key=lambda i: (i["rank"], not i["is_device"]))
+        return {"results": results[:max_results], "total_matches": len(results),
+                "truncated_categories": truncated}
 
     def cmd_load_browser_item(self, uri, track_index=None, kind="track"):
         """Load an item (device, preset, sample) onto a track, like double-clicking it in the browser.

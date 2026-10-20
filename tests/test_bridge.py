@@ -98,3 +98,36 @@ def test_music_helpers():
     assert [n["pitch"] for n in chords[3:]] == [65, 69, 72]
     bass = music.bassline("A", "minor", bars=2, style="root_eighths")
     assert len(bass) == 16 and bass[0]["pitch"] == 45
+
+
+def test_song_key(live):
+    conn, song = live
+    key = conn.send("set_song_key", root_note=5, scale_name="Minor", scale_mode=True)
+    assert key["root"] == "F" and key["scale"] == "Minor" and song.scale_mode is True
+    assert conn.send("get_session_info")["key"]["root"] == "F"
+
+
+def test_search_finds_plugin_despite_huge_sample_library(live):
+    conn, _ = live
+    found = conn.send("search_browser", query="serum 2")["results"]
+    assert found[0]["name"] == "Serum 2" and found[0]["rank"] == 0 and found[0]["category"] == "plugins"
+    # A preset that merely contains the word ranks below the exact plugin match.
+    names = [r["name"] for r in conn.send("search_browser", query="serum")["results"]]
+    assert names[0] == "Serum 2" and "Serum Bass Lead.adv" in names
+    assert conn.send("search_browser", query="808 core kit")["results"][0]["rank"] == 0
+
+
+def test_tech_house_patterns():
+    drums = music.drum_pattern("tech_house", bars=4, variation=0.5, seed=3)
+    kicks = sorted(n["start"] for n in drums if n["pitch"] == music.DRUMS["kick"])
+    assert kicks == [float(b) for b in range(16)]  # kick is never varied away
+    bar1 = {(n["pitch"], n["start"]) for n in drums if n["start"] < 4}
+    bar2 = {(n["pitch"], n["start"] - 4) for n in drums if 4 <= n["start"] < 8}
+    assert bar1 != bar2  # variation changed the answering bar
+
+    bass = music.bassline("F", "minor", bars=2, style="tech_house", seed=1)
+    assert all(n["start"] % 1 != 0 for n in bass)  # stays off the kick
+    assert {n["pitch"] % 12 for n in bass} <= {5, 0}  # F root and its fifth C
+
+    stabs = music.chord_progression("F", "minor", [1], beats_per_chord=4, rhythm="offbeat_stabs")
+    assert len(stabs) == 5 * 3 and stabs[0]["pitch"] == 65
