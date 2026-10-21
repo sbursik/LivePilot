@@ -250,7 +250,8 @@ def fake_browser(samples=40000):
 
 def install():
     live = types.ModuleType("Live")
-    live.Clip = types.SimpleNamespace(MidiNoteSpecification=lambda **kw: types.SimpleNamespace(**kw))
+    live.Clip = types.SimpleNamespace(MidiNoteSpecification=lambda **kw: types.SimpleNamespace(**kw),
+                                      WarpMarker=lambda **kw: types.SimpleNamespace(**kw))
     app = types.SimpleNamespace(get_major_version=lambda: 12, get_minor_version=lambda: 2,
                                 get_bugfix_version=lambda: 0, browser=fake_browser())
     live.Application = types.SimpleNamespace(get_application=lambda: app)

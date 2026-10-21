@@ -340,3 +340,41 @@ def test_load_at_position_and_move_device(live, monkeypatch):
     assert moved["devices"] == ["EQ Eight", "Ozone 11", "Utility"]
     moved = conn.send("move_device", track_index=0, device_index=2, position=0)
     assert moved["devices"] == ["Utility", "EQ Eight", "Ozone 11"]
+
+
+def test_source_bpm_warps_whole_file_at_that_tempo(live):
+    conn, song = live
+
+    class AudioClip(fake_live.FakeClip):
+        is_midi_clip, is_audio_clip = False, True
+        gain_display_string, pitch_coarse, pitch_fine, warp_mode = "0.0 dB", 0, 0.0, 0
+        sample_rate, sample_length = 48000, 48000 * 217.5  # a 217.5 s acapella
+
+        def __init__(self):
+            super().__init__(478.5)
+            self.looping, self.warping = False, False
+            # What Live gives an unwarped 217.5 s file in a 132 BPM set once warping is on.
+            self.real_markers = [fake_live.types.SimpleNamespace(beat_time=0.0, sample_time=0.0),
+                                 fake_live.types.SimpleNamespace(beat_time=478.5, sample_time=217.5)]
+
+        @property
+        def warp_markers(self):
+            # Like Live, list an unremovable marker 1/32 beat after the last real one.
+            last = max(self.real_markers, key=lambda m: m.beat_time)
+            return self.real_markers + [fake_live.types.SimpleNamespace(
+                beat_time=last.beat_time + 0.03125, sample_time=last.sample_time + 0.03125 * 60 / 132)]
+
+        def add_warp_marker(self, m):
+            self.real_markers.append(m)
+
+        def remove_warp_marker(self, beat_time):
+            if not any(m.beat_time == beat_time for m in self.real_markers):
+                raise RuntimeError("no warp marker at %s" % beat_time)
+            self.real_markers = [m for m in self.real_markers if m.beat_time != beat_time]
+
+    clip = AudioClip()
+    song.tracks[0].clip_slots[0].clip = clip
+    result = conn.send("set_audio_clip_properties", track_index=0, slot_index=0, source_bpm=128)
+    assert result["warping"] is True
+    assert [(m.beat_time, m.sample_time) for m in clip.real_markers] == [(0.0, 0.0), (464.0, 217.5)]
+    assert clip.end_marker == clip.loop_end == 464.0

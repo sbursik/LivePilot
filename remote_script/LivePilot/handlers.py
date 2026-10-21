@@ -658,12 +658,15 @@ class Handlers(object):
         return {"length": c.length}
 
     def cmd_set_audio_clip_properties(self, track_index, slot_index=None, *, arrangement_clip_index=None, gain=None, pitch_coarse=None,
-                                      pitch_fine=None, warping=None, warp_mode=None):
+                                      pitch_fine=None, warping=None, warp_mode=None, source_bpm=None):
         """gain: 0..1 normalized (Live's clip gain slider). warp_mode: 0 Beats, 1 Tones, 2 Texture,
-        3 Re-Pitch, 4 Complex, 6 Complex Pro."""
+        3 Re-Pitch, 4 Complex, 6 Complex Pro. source_bpm: the tempo the file was recorded at; warps
+        the whole file at that tempo so it follows the song tempo."""
         c = self._clip(track_index, slot_index, arrangement_clip_index)
         if not c.is_audio_clip:
             raise CommandError("clip is not an audio clip")
+        if source_bpm is not None:
+            self._warp_at_tempo(c, float(source_bpm))
         if gain is not None:
             c.gain = max(0.0, min(1.0, float(gain)))
         if pitch_coarse is not None:
@@ -675,7 +678,38 @@ class Handlers(object):
         if warp_mode is not None:
             c.warp_mode = int(warp_mode)
         return {"gain": c.gain_display_string, "pitch_coarse": c.pitch_coarse,
-                "pitch_fine": c.pitch_fine, "warping": c.warping, "warp_mode": int(c.warp_mode)}
+                "pitch_fine": c.pitch_fine, "warping": c.warping, "warp_mode": int(c.warp_mode),
+                "length": c.length}
+
+    def _warp_at_tempo(self, c, bpm):
+        """Warp the whole file at one tempo (e.g. an acapella recorded at 128 BPM): keep the first
+        warp marker and replace the rest with one marker on the file's last sample."""
+        if not hasattr(c, "add_warp_marker"):
+            raise CommandError("this Live version can't set warp markers from a script (needs Live 11+)")
+        c.warping = True
+        markers = sorted(c.warp_markers, key=lambda m: m.beat_time)
+        first = markers[0]
+        seconds = c.sample_length / float(c.sample_rate)
+        end_beat = first.beat_time + (seconds - first.sample_time) * bpm / 60.0
+        try:
+            marker = Live.Clip.WarpMarker(beat_time=end_beat, sample_time=seconds)
+        except Exception:
+            marker = {"beat_time": end_beat, "sample_time": seconds}
+        c.add_warp_marker(marker)
+        for m in markers[1:]:
+            if abs(m.beat_time - end_beat) > 1e-6:
+                # Live lists a marker 1/32 beat after the last real one; it can't be removed and
+                # moves when the last one does, so a stale copy of it raises here.
+                try:
+                    c.remove_warp_marker(m.beat_time)
+                except Exception:
+                    pass
+        # Unwarped, the end markers were in seconds; put them on the file's end in beats.
+        for attr in ("end_marker", "loop_end"):
+            try:
+                setattr(c, attr, end_beat)
+            except Exception:
+                pass
 
     # ----------------------------------------------------------------- notes
 

@@ -319,14 +319,17 @@ def set_audio_clip_properties(track_index: int, slot_index: int | None = None,
                               transpose_semitones: int | None = None, detune_cents: float | None = None,
                               warping: bool | None = None,
                               warp_mode: Literal["beats", "tones", "texture", "repitch", "complex",
-                                                 "complex_pro"] | None = None) -> dict:
+                                                 "complex_pro"] | None = None,
+                              source_bpm: float | None = None) -> dict:
     """Adjust an audio clip (e.g. a vocal): gain (0..1 slider position, ~0.4 = 0 dB), pitch,
     warping and warp mode (complex_pro suits vocals). Pass slot_index for a Session clip or
-    arrangement_clip_index for an Arrangement clip."""
+    arrangement_clip_index for an Arrangement clip. source_bpm is the tempo the file was
+    recorded at (e.g. an acapella's stated BPM): it warps the whole file at that tempo so it
+    follows the song tempo. Use it instead of trusting Live's auto-warp on vocals."""
     modes = {"beats": 0, "tones": 1, "texture": 2, "repitch": 3, "complex": 4, "complex_pro": 6}
     return _send("set_audio_clip_properties", gain=gain, pitch_coarse=transpose_semitones,
                  pitch_fine=detune_cents, warping=warping, warp_mode=modes[warp_mode] if warp_mode else None,
-                 **_ref(track_index, slot_index, arrangement_clip_index))
+                 source_bpm=source_bpm, **_ref(track_index, slot_index, arrangement_clip_index))
 
 
 @mcp.tool()
