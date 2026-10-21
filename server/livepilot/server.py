@@ -705,25 +705,49 @@ def analyze_audio_file(path: str, start_sec: float | None = None, end_sec: float
 @mcp.tool()
 def analyze_clip(track_index: int, slot_index: int | None = None,
                  arrangement_clip_index: int | None = None) -> dict:
-    """Analyse an audio clip in the set (Session slot or Arrangement clip) from its source file.
-    For warped clips only the part between the clip's start and end markers is analysed;
-    unwarped clips are analysed whole. Uses the song tempo for rhythm figures. Clip gain,
-    effects and faders aren't applied: this measures the source audio."""
+    """Analyse an audio clip in the set (Session slot or Arrangement clip) from its source file,
+    limited to the audio the clip actually plays when it's warped: for an Arrangement clip, from
+    its start marker for its length in the arrangement; for a looped clip, its loop region.
+    Unwarped clips are analysed whole. Uses the song tempo for rhythm figures. Clip gain, effects
+    and faders aren't applied: this measures the source audio."""
     info = _send("get_clip_info", **_ref(track_index, slot_index, arrangement_clip_index))
     if info.get("is_midi"):
         return {"error": "MIDI clip: there is no audio to analyse. Bounce or freeze and flatten the track, "
                          "or export it, then use analyze_audio_file."}
     start = end = None
-    region = "whole file"
+    region = {"description": "whole file (clip is unwarped, so its markers can't be mapped to the file)"}
     markers = info.get("warp_markers") or []
     if info.get("warping") and len(markers) >= 2:
-        start = max(0.0, _beats_to_seconds(info["start_marker"], markers))
-        end = _beats_to_seconds(info["end_marker"], markers)
-        region = "between clip start and end markers"
+        b0, b1, description = _played_beats(info)
+        start = max(0.0, _beats_to_seconds(b0, markers))
+        end = _beats_to_seconds(b1, markers)
+        region = {"description": description, "clip_beats": [round(b0, 3), round(b1, 3)],
+                  "file_seconds": [round(start, 3), round(end, 3)]}
     a = _analysis()
     result = a.public(a.analyze(info["file_path"], start, end, _song_tempo()))
     result["clip"] = {"name": info["name"], "region": region}
     return result
+
+
+def _played_beats(info: dict) -> tuple[float, float, str]:
+    """The span of clip content (in clip beats) that the clip plays.
+
+    Trimming an Arrangement clip changes its length in the arrangement but not its end marker, so
+    for Arrangement clips the played span is start marker + arrangement length, not the end marker."""
+    looping = info.get("looping")
+    loop = (info["loop_start"], info["loop_end"])
+    if info.get("start_time") is not None:  # Arrangement clip
+        length = info["end_time"] - info["start_time"]
+        if looping:
+            if length >= loop[1] - loop[0]:
+                return loop[0], loop[1], "loop region (repeats in the arrangement)"
+            begin = info["start_marker"]
+            return begin, min(loop[1], begin + length), "part of the loop played in the arrangement"
+        begin = info["start_marker"]
+        return begin, min(info["end_marker"], begin + length), "region played in the arrangement"
+    if looping:
+        return loop[0], loop[1], "loop region"
+    return info["start_marker"], info["end_marker"], "between start and end markers"
 
 
 @mcp.tool()

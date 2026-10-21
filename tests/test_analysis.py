@@ -103,10 +103,13 @@ def test_stereo_and_low_end_mono(tmp_path):
 
 # ------------------------------------------------------------ rhythm and key
 
-@pytest.mark.parametrize("bpm", [124.0, 128.0, 174.0])
-def test_tempo_detection(tmp_path, bpm):
+@pytest.mark.parametrize("bpm,expected", [(124.0, 124.0), (128.0, 128.0),
+                                          # Without a song tempo, fast tempos read at half speed:
+                                          # the same pulse, settled by the 110 BPM preference.
+                                          (174.0, 87.0)])
+def test_tempo_detection(tmp_path, bpm, expected):
     r = analysis.analyze(write(tmp_path, f"click{bpm}.wav", click_track(bpm, 16)))
-    assert r["rhythm"]["tempo_bpm_detected"] == pytest.approx(bpm, abs=1.0)
+    assert r["rhythm"]["tempo_bpm_detected"] == pytest.approx(expected, abs=1.0)
 
 
 def test_onsets_per_beat_uses_given_tempo(tmp_path):
@@ -213,3 +216,47 @@ def test_clip_region_from_warp_markers():
     assert _beats_to_seconds(-1.0, markers) == pytest.approx(-0.25)  # before the first
     tempo_change = markers + [{"beat_time": 16.0, "sample_time": 6.25}]  # second half twice as fast
     assert _beats_to_seconds(12.0, tempo_change) == pytest.approx(5.25)
+
+
+def test_loop_length_settles_three_four_ratio_errors(tmp_path):
+    # A 4-bar loop at 100 BPM with 16th-note hats: the classic case that read as 133 BPM.
+    bpm, bars = 100.0, 4
+    x = click_track(bpm * 4, bars * 240 / bpm) * 0.3 + click_track(bpm, bars * 240 / bpm)
+    r = analysis.analyze(write(tmp_path, "loop100.wav", x))["rhythm"]
+    assert r["tempo_bpm_detected"] == pytest.approx(100.0, abs=0.5)
+    assert r["tempo_method"].startswith("loop length")
+
+
+def test_song_tempo_settles_double_or_half(tmp_path):
+    x = click_track(87.0, 16)
+    unhinted = analysis.analyze(write(tmp_path, "dnb.wav", x))["rhythm"]["tempo_bpm_detected"]
+    hinted = analysis.analyze(write(tmp_path, "dnb2.wav", x), tempo_bpm=174.0)["rhythm"]
+    assert unhinted == pytest.approx(87.0, abs=1.0)
+    assert hinted["tempo_bpm_detected"] == pytest.approx(174.0, abs=1.0)
+    assert "song tempo" in hinted["tempo_method"]
+
+
+def test_no_tempo_reported_without_a_steady_beat(tmp_path):
+    # Notes at random times, like a rubato vocal phrase.
+    rng = np.random.default_rng(5)
+    x = np.zeros(12 * SR)
+    for start in np.sort(rng.uniform(0, 11.5, 14)):
+        i = int(start * SR)
+        x[i:i + SR // 3] += tone(60 + rng.integers(0, 12), 1 / 3) * np.hanning(SR // 3)
+    r = analysis.analyze(write(tmp_path, "rubato.wav", x))["rhythm"]
+    assert r["tempo_bpm_detected"] is None and "no steady beat" in r["tempo_note"]
+
+
+def test_played_region_of_trimmed_arrangement_clip():
+    from livepilot.server import _played_beats
+    # The clip is trimmed to 192 beats in the arrangement but its end marker is still the file's end.
+    info = {"start_time": 64.0, "end_time": 256.0, "start_marker": 8.0, "end_marker": 449.0,
+            "looping": False, "loop_start": 8.0, "loop_end": 449.0}
+    assert _played_beats(info)[:2] == (8.0, 200.0)
+    looped = dict(info, looping=True, loop_start=0.0, loop_end=16.0)
+    assert _played_beats(looped)[:2] == (0.0, 16.0)                    # loop repeats: whole loop
+    short = dict(looped, start_time=0.0, end_time=4.0, start_marker=2.0)
+    assert _played_beats(short)[:2] == (2.0, 6.0)                       # shorter than one loop
+    session = {"start_marker": 4.0, "end_marker": 20.0, "looping": False, "loop_start": 0.0, "loop_end": 32.0}
+    assert _played_beats(session)[:2] == (4.0, 20.0)
+    assert _played_beats(dict(session, looping=True))[:2] == (0.0, 32.0)

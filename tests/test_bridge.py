@@ -231,7 +231,7 @@ def test_analyser_tools_end_to_end(live, monkeypatch, tmp_path):
         return json.loads(result.content[0].text)
 
     clip = call("analyze_clip", {"track_index": 1, "slot_index": 0})
-    assert clip["clip"]["region"] == "whole file" and clip["spectrum"]["bands"]
+    assert clip["clip"]["region"]["description"].startswith("whole file") and clip["spectrum"]["bands"]
 
     space = call("analyze_frequency_space", {})
     assert space["files"] == 1 and space["not_measured"] == ["1-MIDI"]
