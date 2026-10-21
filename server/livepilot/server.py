@@ -242,12 +242,12 @@ def get_clip_info(track_index: int, slot_index: int | None = None,
 
 
 @mcp.tool()
-def get_arrangement_clips(track_index: int | None = None) -> list:
-    """List every clip in the Arrangement (or on one track) as one flat list, ordered by track
+def get_arrangement_clips(track_index: int | None = None) -> dict:
+    """List every clip in the Arrangement (or on one track) as {"clips": [...]}, ordered by track
     then start time. Each entry has track_index, track name, arrangement_clip_index (counted per
     track), start/end in beats, type, mute state and, for audio, file path. Use this before
     editing arrangement clips such as vocals."""
-    return _send("get_arrangement_clips", track_index=track_index)
+    return {"clips": _send("get_arrangement_clips", track_index=track_index)}
 
 
 @mcp.tool()
@@ -481,9 +481,9 @@ def manage_scene(action: Literal["create", "delete", "duplicate", "rename", "fir
 # ---------------------------------------------------------------- devices
 
 @mcp.tool()
-def get_devices(track_index: int, kind: TrackKind = "track") -> list:
+def get_devices(track_index: int, kind: TrackKind = "track") -> dict:
     """List the devices on a track, including rack chains and loaded Drum Rack pads."""
-    return _send("get_devices", track_index=track_index, kind=kind)
+    return {"devices": _send("get_devices", track_index=track_index, kind=kind)}
 
 
 @mcp.tool()
@@ -538,10 +538,10 @@ def search_browser(query: str, category: Literal["all", "instruments", "audio_ef
 def browse(category: Literal["instruments", "audio_effects", "midi_effects", "drums", "sounds", "samples",
                              "clips", "plugins", "max_for_live", "user_library", "packs",
                              "current_project"],
-           path: str = "") -> list:
+           path: str = "") -> dict:
     """List one folder of Live's browser. path is '/'-separated folder names, e.g. 'Drum Rack'
     under drums, or '' for the top level."""
-    return _send("browse", category=category, path=path)
+    return {"items": _send("browse", category=category, path=path)}
 
 
 @mcp.tool()
@@ -601,11 +601,11 @@ def plugin_presets(track_index: int, device_index: int, select_index: int | None
 
 @mcp.tool()
 def manage_locator(action: Literal["list", "add", "delete", "jump"], time: float | None = None,
-                   name: str | None = None, index: int | None = None) -> Any:
+                   name: str | None = None, index: int | None = None) -> dict:
     """Arrangement locators: list them, add one at `time` (beats) with an optional name
     (e.g. 'Intro', 'Drop'), delete one by index, or jump the playhead to one."""
     if action == "list":
-        return _send("get_locators")
+        return {"locators": _send("get_locators")}
     if action == "add":
         return _send("add_locator", time=time, name=name)
     if action == "delete":
@@ -645,9 +645,10 @@ def back_to_arrangement() -> dict:
 
 
 @mcp.tool()
-def raw_command(command: str, params: dict | None = None) -> Any:
-    """Escape hatch: send any Remote Script command directly. Use 'list_commands' to see all."""
-    return live.send(command, **(params or {}))
+def raw_command(command: str, params: dict | None = None) -> dict:
+    """Escape hatch: send any Remote Script command directly. Use 'list_commands' to see all.
+    The bridge's reply is returned under "result"."""
+    return {"result": live.send(command, **(params or {}))}
 
 
 def main() -> None:

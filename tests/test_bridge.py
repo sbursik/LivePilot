@@ -179,3 +179,20 @@ def test_arrangement_listing_skips_group_tracks(live):
     assert conn.send("get_track_info", track_index=0)["arrangement_clips"] == []
     with pytest.raises(LiveError, match="out of range"):
         conn.send("get_clip_info", track_index=0, arrangement_clip_index=0)
+
+
+@pytest.mark.parametrize("tool,args", [
+    ("get_arrangement_clips", {}), ("get_devices", {"track_index": 0}),
+    ("browse", {"category": "drums"}), ("manage_locator", {"action": "list"}),
+    ("raw_command", {"command": "get_locators"}),
+])
+def test_list_results_arrive_as_one_block(monkeypatch, tool, args):
+    # MCP turns a returned list into one content block per item, so tools must wrap lists.
+    import asyncio
+    from livepilot import server
+
+    rows = [{"name": "a"}, {"name": "b"}, {"name": "c"}]
+    monkeypatch.setattr(server, "_send", lambda cmd, **p: rows)
+    monkeypatch.setattr(server.live, "send", lambda cmd, **p: rows)
+    result = asyncio.run(server.mcp.call_tool(tool, args))
+    assert len(result.content) == 1
