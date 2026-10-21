@@ -378,3 +378,25 @@ def test_source_bpm_warps_whole_file_at_that_tempo(live):
     assert result["warping"] is True
     assert [(m.beat_time, m.sample_time) for m in clip.real_markers] == [(0.0, 0.0), (464.0, 217.5)]
     assert clip.end_marker == clip.loop_end == 464.0
+
+
+def test_copy_clip_to_a_slot_on_the_same_track(live, monkeypatch):
+    import asyncio
+    from livepilot import server
+
+    conn, song = live
+    monkeypatch.setattr(server, "live", conn)
+    track = song.tracks[0]
+    track.clip_slots[0].create_clip(8)
+    asyncio.run(server.mcp.call_tool("duplicate_clip", {"track_index": 0, "slot_index": 0, "target_slot_index": 3}))
+    assert track.clip_slots[3].has_clip and not track.clip_slots[1].has_clip
+
+
+def test_markers_on_an_unlooped_clip_set_its_region(live):
+    conn, song = live
+    song.tracks[0].clip_slots[0].create_clip(464)
+    clip = song.tracks[0].clip_slots[0].clip
+    clip.looping = False
+    result = conn.send("set_clip_loop", track_index=0, slot_index=0, start_marker=32, end_marker=192)
+    assert (result["loop_start"], result["loop_end"]) == (32.0, 192.0)
+    assert (result["start_marker"], result["end_marker"]) == (32.0, 192.0)

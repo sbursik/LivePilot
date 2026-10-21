@@ -94,6 +94,10 @@ class FakeSlot:
     def delete_clip(self):
         self.clip = None
 
+    def duplicate_clip_to(self, target):
+        import copy
+        target.clip = copy.copy(self.clip)
+
 
 class FakeTrack:
     has_midi_input = True

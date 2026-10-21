@@ -636,6 +636,11 @@ class Handlers(object):
         c = self._clip(track_index, slot_index, arrangement_clip_index)
         if looping is not None:
             c.looping = bool(looping)
+        if not c.looping:
+            # An unlooped clip plays from loop_start to loop_end, and Live ignores a start_marker
+            # past loop_start, so markers set the region through the loop points.
+            loop_start = start_marker if loop_start is None else loop_start
+            loop_end = end_marker if loop_end is None else loop_end
         # Order matters: Live rejects loop_start >= loop_end.
         if loop_end is not None and loop_start is not None and float(loop_start) >= c.loop_end:
             c.loop_end = float(loop_end)

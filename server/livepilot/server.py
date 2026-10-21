@@ -283,9 +283,12 @@ def delete_clip(track_index: int, slot_index: int) -> dict:
 @mcp.tool()
 def duplicate_clip(track_index: int, slot_index: int, target_track_index: int | None = None,
                    target_slot_index: int | None = None) -> dict:
-    """Copy a clip. Without a target, it duplicates into the next free slot below (like Ctrl+D)."""
-    if target_track_index is None or target_slot_index is None:
+    """Copy a clip. Without a target, it duplicates into the next free slot below (like Ctrl+D).
+    target_track_index defaults to the same track."""
+    if target_slot_index is None:
         return _send("duplicate_clip_slot", track_index=track_index, slot_index=slot_index)
+    if target_track_index is None:
+        target_track_index = track_index
     return _send("copy_clip", track_index=track_index, slot_index=slot_index,
                  target_track_index=target_track_index, target_slot_index=target_slot_index)
 
