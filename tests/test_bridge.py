@@ -131,3 +131,35 @@ def test_tech_house_patterns():
 
     stabs = music.chord_progression("F", "minor", [1], beats_per_chord=4, rhythm="offbeat_stabs")
     assert len(stabs) == 5 * 3 and stabs[0]["pitch"] == 65
+
+
+def test_arrangement_clips(live):
+    conn, song = live
+    track = song.tracks[0]
+    # Live doesn't promise any order; indices must follow start time.
+    late, early = fake_live.FakeClip(8, start_time=32.0), fake_live.FakeClip(4, start_time=0.0)
+    late.name, early.name = "Drop", "Intro"
+    track.arrangement_clips = [late, early]
+
+    listing = conn.send("get_arrangement_clips")
+    assert [c["name"] for c in listing[0]["clips"]] == ["Intro", "Drop"]
+    assert conn.send("get_track_info", track_index=0)["arrangement_clips"][1]["name"] == "Drop"
+
+    info = conn.send("get_clip_info", track_index=0, arrangement_clip_index=1)
+    assert info["start_time"] == 32.0 and info["end_time"] == 40.0
+
+    conn.send("add_notes", track_index=0, arrangement_clip_index=1,
+              notes=[{"pitch": 60, "start": 0.3, "duration": 0.5}])
+    conn.send("quantize_notes", track_index=0, arrangement_clip_index=1, grid=0.25)
+    assert conn.send("get_notes", track_index=0, arrangement_clip_index=1)["notes"][0]["start"] == 0.25
+    assert early.notes == []  # the other clip was untouched
+
+    conn.send("set_clip_muted", track_index=0, arrangement_clip_index=0, muted=True)
+    assert early.muted is True
+    assert conn.send("delete_arrangement_clip", track_index=0, arrangement_clip_index=0)["deleted"] == "Intro"
+    assert track.arrangement_clips == [late]
+
+    with pytest.raises(LiveError, match="out of range"):
+        conn.send("get_clip_info", track_index=0, arrangement_clip_index=5)
+    with pytest.raises(LiveError, match="pass slot_index"):
+        conn.send("get_notes", track_index=0)

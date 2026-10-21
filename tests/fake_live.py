@@ -37,8 +37,12 @@ class FakeClip:
     is_midi_clip = True
     is_audio_clip = False
 
-    def __init__(self, length):
+    def __init__(self, length, start_time=None):
         self.name = ""
+        self.is_arrangement_clip = start_time is not None
+        self.start_time = start_time or 0.0
+        self.end_time = self.start_time + length
+        self.muted = False
         self.length = self.loop_end = self.end_marker = length
         self.loop_start = self.start_marker = 0.0
         self.looping = True
@@ -90,6 +94,9 @@ class FakeTrack:
         self.devices = []
         self.clip_slots = [FakeSlot() for _ in range(scenes)]
         self.arrangement_clips = []
+
+    def delete_clip(self, clip):
+        self.arrangement_clips.remove(clip)
 
 
 class FakeSong:

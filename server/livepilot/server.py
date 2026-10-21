@@ -11,6 +11,9 @@ Working style:
   The generators default to the set's key.
 - When the user names an instrument or plugin (e.g. Serum 2), load exactly that with
   load_device_by_name. Never substitute a default Live device without saying so.
+- Clips in the Arrangement (vocals, recorded audio, placed sections) are edited with the same
+  clip and note tools by passing arrangement_clip_index instead of slot_index. Find indices
+  with get_arrangement_clips.
 - Generators give a starting point. Shape the result with add_notes and edit_notes (vary bars,
   add ghost notes, adjust velocities) instead of leaving raw patterns.
 - Plugin parameters are only reachable if Live exposes them (get_device_parameters). For big
@@ -224,11 +227,26 @@ def set_track_routing(track_index: int, input: str | None = None, input_channel:
 
 # ------------------------------------------------------------------ clips
 
+def _ref(track_index: int, slot_index: int | None, arrangement_clip_index: int | None) -> dict:
+    return {"track_index": track_index, "slot_index": slot_index,
+            "arrangement_clip_index": arrangement_clip_index}
+
+
 @mcp.tool()
-def get_clip_info(track_index: int, slot_index: int) -> dict:
-    """Clip details: length, loop and markers. For audio clips this includes the file path, gain,
-    pitch, warp mode and warp markers."""
-    return _send("get_clip_info", track_index=track_index, slot_index=slot_index)
+def get_clip_info(track_index: int, slot_index: int | None = None,
+                  arrangement_clip_index: int | None = None) -> dict:
+    """Clip details: length, loop and markers (plus start/end time for arrangement clips).
+    For audio clips this includes the file path, gain, pitch, warp mode and warp markers.
+    Pass slot_index for a Session clip or arrangement_clip_index for an Arrangement clip."""
+    return _send("get_clip_info", **_ref(track_index, slot_index, arrangement_clip_index))
+
+
+@mcp.tool()
+def get_arrangement_clips(track_index: int | None = None) -> list:
+    """List every clip in the Arrangement (or on one track) with its arrangement_clip_index,
+    start/end in beats, type, mute state and, for audio, file path. Use this before editing
+    arrangement clips such as vocals."""
+    return _send("get_arrangement_clips", track_index=track_index)
 
 
 @mcp.tool()
@@ -260,35 +278,42 @@ def duplicate_clip(track_index: int, slot_index: int, target_track_index: int | 
 
 
 @mcp.tool()
-def set_clip_properties(track_index: int, slot_index: int, name: str | None = None,
-                        color_index: int | None = None, looping: bool | None = None,
-                        loop_start: float | None = None, loop_end: float | None = None,
-                        start_marker: float | None = None, end_marker: float | None = None) -> dict:
-    """Rename or recolor a clip and set its loop region and markers (in beats)."""
+def set_clip_properties(track_index: int, slot_index: int | None = None,
+                        arrangement_clip_index: int | None = None, name: str | None = None,
+                        color_index: int | None = None, muted: bool | None = None,
+                        looping: bool | None = None, loop_start: float | None = None,
+                        loop_end: float | None = None, start_marker: float | None = None,
+                        end_marker: float | None = None) -> dict:
+    """Rename, recolor or mute a clip and set its loop region and markers (in beats).
+    Pass slot_index for a Session clip or arrangement_clip_index for an Arrangement clip."""
+    ref = _ref(track_index, slot_index, arrangement_clip_index)
     result: dict = {}
     if name is not None:
-        result.update(_send("set_clip_name", track_index=track_index, slot_index=slot_index, name=name))
+        result.update(_send("set_clip_name", name=name, **ref))
     if color_index is not None:
-        result.update(_send("set_clip_color", track_index=track_index, slot_index=slot_index,
-                            color_index=color_index))
+        result.update(_send("set_clip_color", color_index=color_index, **ref))
+    if muted is not None:
+        result.update(_send("set_clip_muted", muted=muted, **ref))
     if any(v is not None for v in (looping, loop_start, loop_end, start_marker, end_marker)):
-        result.update(_send("set_clip_loop", track_index=track_index, slot_index=slot_index,
-                            looping=looping, loop_start=loop_start, loop_end=loop_end,
-                            start_marker=start_marker, end_marker=end_marker))
+        result.update(_send("set_clip_loop", looping=looping, loop_start=loop_start, loop_end=loop_end,
+                            start_marker=start_marker, end_marker=end_marker, **ref))
     return result
 
 
 @mcp.tool()
-def set_audio_clip_properties(track_index: int, slot_index: int, gain: float | None = None,
+def set_audio_clip_properties(track_index: int, slot_index: int | None = None,
+                              arrangement_clip_index: int | None = None, gain: float | None = None,
                               transpose_semitones: int | None = None, detune_cents: float | None = None,
                               warping: bool | None = None,
                               warp_mode: Literal["beats", "tones", "texture", "repitch", "complex",
                                                  "complex_pro"] | None = None) -> dict:
-    """Adjust an audio clip: gain (0..1 slider position, ~0.4 = 0 dB), pitch, warping and warp mode."""
+    """Adjust an audio clip (e.g. a vocal): gain (0..1 slider position, ~0.4 = 0 dB), pitch,
+    warping and warp mode (complex_pro suits vocals). Pass slot_index for a Session clip or
+    arrangement_clip_index for an Arrangement clip."""
     modes = {"beats": 0, "tones": 1, "texture": 2, "repitch": 3, "complex": 4, "complex_pro": 6}
-    return _send("set_audio_clip_properties", track_index=track_index, slot_index=slot_index, gain=gain,
-                 pitch_coarse=transpose_semitones, pitch_fine=detune_cents, warping=warping,
-                 warp_mode=modes[warp_mode] if warp_mode else None)
+    return _send("set_audio_clip_properties", gain=gain, pitch_coarse=transpose_semitones,
+                 pitch_fine=detune_cents, warping=warping, warp_mode=modes[warp_mode] if warp_mode else None,
+                 **_ref(track_index, slot_index, arrangement_clip_index))
 
 
 @mcp.tool()
@@ -305,38 +330,47 @@ def launch(target: Literal["clip", "scene", "stop_clip", "stop_track"], track_in
 
 
 @mcp.tool()
-def duplicate_clip_loop(track_index: int, slot_index: int) -> dict:
+def duplicate_clip_loop(track_index: int, slot_index: int | None = None,
+                        arrangement_clip_index: int | None = None) -> dict:
     """Double a MIDI clip's loop, copying its notes into the new half."""
-    return _send("duplicate_clip_loop", track_index=track_index, slot_index=slot_index)
+    return _send("duplicate_clip_loop", **_ref(track_index, slot_index, arrangement_clip_index))
 
 
 # ------------------------------------------------------------------ notes
+# Every note tool takes slot_index (Session clip) or arrangement_clip_index (Arrangement clip).
+# Note times are relative to the clip's start, not the song.
 
 @mcp.tool()
-def get_notes(track_index: int, slot_index: int) -> dict:
-    """Read all MIDI notes in a clip: pitch, start, duration, velocity, mute, probability."""
-    return _send("get_notes", track_index=track_index, slot_index=slot_index)
+def get_notes(track_index: int, slot_index: int | None = None,
+              arrangement_clip_index: int | None = None) -> dict:
+    """Read all MIDI notes in a clip: pitch, start, duration, velocity, mute, probability.
+    Pass slot_index for a Session clip or arrangement_clip_index for an Arrangement clip."""
+    return _send("get_notes", **_ref(track_index, slot_index, arrangement_clip_index))
 
 
 @mcp.tool()
-def add_notes(track_index: int, slot_index: int, notes: list[dict], replace: bool = False) -> dict:
+def add_notes(track_index: int, notes: list[dict], slot_index: int | None = None,
+              arrangement_clip_index: int | None = None, replace: bool = False) -> dict:
     """Write MIDI notes into a clip. Each note: {"pitch": 60, "start": 0.0, "duration": 0.5,
-    "velocity": 100, "mute": false, "probability": 1.0}. Times are in beats.
-    replace=True clears the clip first."""
-    return _send("add_notes", track_index=track_index, slot_index=slot_index, notes=notes, replace=replace)
+    "velocity": 100, "mute": false, "probability": 1.0}. Times are in beats from the clip start.
+    replace=True clears the clip first. Pass slot_index for a Session clip or
+    arrangement_clip_index for an Arrangement clip."""
+    return _send("add_notes", notes=notes, replace=replace,
+                 **_ref(track_index, slot_index, arrangement_clip_index))
 
 
 @mcp.tool()
-def remove_notes(track_index: int, slot_index: int, from_pitch: int = 0, pitch_span: int = 128,
-                 from_time: float = 0.0, time_span: float | None = None) -> dict:
+def remove_notes(track_index: int, slot_index: int | None = None, arrangement_clip_index: int | None = None,
+                 from_pitch: int = 0, pitch_span: int = 128, from_time: float = 0.0,
+                 time_span: float | None = None) -> dict:
     """Delete notes in a pitch/time range (defaults to every note in the clip)."""
-    return _send("remove_notes", track_index=track_index, slot_index=slot_index, from_pitch=from_pitch,
-                 pitch_span=pitch_span, from_time=from_time, time_span=time_span)
+    return _send("remove_notes", from_pitch=from_pitch, pitch_span=pitch_span, from_time=from_time,
+                 time_span=time_span, **_ref(track_index, slot_index, arrangement_clip_index))
 
 
 @mcp.tool()
-def edit_notes(track_index: int, slot_index: int,
-               operation: Literal["quantize", "humanize", "transpose", "velocity"],
+def edit_notes(track_index: int, operation: Literal["quantize", "humanize", "transpose", "velocity"],
+               slot_index: int | None = None, arrangement_clip_index: int | None = None,
                pitch: int | None = None, grid: float = 0.25, amount: float = 1.0,
                quantize_ends: bool = False, timing: float = 0.01, velocity_range: float = 8,
                semitones: int = 0, velocity_factor: float = 1.0, velocity_offset: float = 0.0,
@@ -345,8 +379,9 @@ def edit_notes(track_index: int, slot_index: int,
     - quantize: snap to grid (beats: 0.25 = 1/16, 0.5 = 1/8, 1/3 = 1/8 triplet) by amount 0..1.
     - humanize: random timing shift up to `timing` beats, velocity by up to `velocity_range`.
     - transpose: shift by `semitones`.
-    - velocity: new = old * velocity_factor + velocity_offset."""
-    base = {"track_index": track_index, "slot_index": slot_index, "pitch": pitch}
+    - velocity: new = old * velocity_factor + velocity_offset.
+    Pass slot_index for a Session clip or arrangement_clip_index for an Arrangement clip."""
+    base = {"pitch": pitch, **_ref(track_index, slot_index, arrangement_clip_index)}
     if operation == "quantize":
         return _send("quantize_notes", grid=grid, amount=amount, quantize_ends=quantize_ends, **base)
     if operation == "humanize":
@@ -596,9 +631,10 @@ def create_arrangement_clip(track_index: int, start: float, length: float) -> di
 
 
 @mcp.tool()
-def delete_arrangement_clip(track_index: int, clip_index: int) -> dict:
-    """Delete an arrangement clip by its index in get_track_info's arrangement_clips list."""
-    return _send("delete_arrangement_clip", track_index=track_index, clip_index=clip_index)
+def delete_arrangement_clip(track_index: int, arrangement_clip_index: int) -> dict:
+    """Delete an arrangement clip by its arrangement_clip_index (see get_arrangement_clips)."""
+    return _send("delete_arrangement_clip", track_index=track_index,
+                 arrangement_clip_index=arrangement_clip_index)
 
 
 @mcp.tool()

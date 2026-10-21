@@ -57,14 +57,28 @@ class Handlers(object):
             raise CommandError("slot index %d out of range (0-%d)" % (slot_index, len(track.clip_slots) - 1))
         return track.clip_slots[slot_index]
 
-    def _clip(self, track_index, slot_index):
+    def _clip(self, track_index, slot_index=None, arrangement_clip_index=None):
+        """A Session clip (slot_index) or an Arrangement clip (arrangement_clip_index, the
+        position in the track's arrangement clips ordered by start time)."""
+        if arrangement_clip_index is not None:
+            clips = self._arrangement_clips(self._track(track_index))
+            if not 0 <= arrangement_clip_index < len(clips):
+                raise CommandError("arrangement clip index %d out of range (track has %d)"
+                                   % (arrangement_clip_index, len(clips)))
+            return clips[arrangement_clip_index]
+        if slot_index is None:
+            raise CommandError("pass slot_index (Session) or arrangement_clip_index (Arrangement)")
         slot = self._slot(track_index, slot_index)
         if not slot.has_clip:
             raise CommandError("no clip in track %d slot %d" % (track_index, slot_index))
         return slot.clip
 
-    def _midi_clip(self, track_index, slot_index):
-        clip = self._clip(track_index, slot_index)
+    @staticmethod
+    def _arrangement_clips(track):
+        return sorted(getattr(track, "arrangement_clips", []), key=lambda c: c.start_time)
+
+    def _midi_clip(self, track_index, slot_index=None, arrangement_clip_index=None):
+        clip = self._clip(track_index, slot_index, arrangement_clip_index)
         if not clip.is_midi_clip:
             raise CommandError("clip is not a MIDI clip")
         return clip
@@ -335,10 +349,8 @@ class Handlers(object):
                            "is_midi": s.clip.is_midi_clip} if s.has_clip else None)}
                 for i, s in enumerate(t.clip_slots)
             ]
-            info["arrangement_clips"] = [
-                {"name": c.name, "start": c.start_time, "end": c.end_time}
-                for c in getattr(t, "arrangement_clips", [])
-            ]
+            info["arrangement_clips"] = [self._arrangement_clip_summary(i, c)
+                                         for i, c in enumerate(self._arrangement_clips(t))]
             try:
                 info["input_routing"] = t.input_routing_type.display_name
                 info["output_routing"] = t.output_routing_type.display_name
@@ -482,8 +494,8 @@ class Handlers(object):
 
     # ================================================================= clips
 
-    def cmd_get_clip_info(self, track_index, slot_index):
-        c = self._clip(track_index, slot_index)
+    def cmd_get_clip_info(self, track_index, slot_index=None, arrangement_clip_index=None):
+        c = self._clip(track_index, slot_index, arrangement_clip_index)
         info = {
             "name": c.name,
             "is_midi": c.is_midi_clip,
@@ -497,6 +509,8 @@ class Handlers(object):
             "color_index": c.color_index,
             "signature": "%d/%d" % (c.signature_numerator, c.signature_denominator),
         }
+        if c.is_arrangement_clip:
+            info.update({"start_time": c.start_time, "end_time": c.end_time, "muted": c.muted})
         if c.is_audio_clip:
             info.update({
                 "file_path": c.file_path,
@@ -544,12 +558,18 @@ class Handlers(object):
         src.duplicate_clip_to(dst)
         return {"copied": True}
 
-    def cmd_set_clip_name(self, track_index, slot_index, name):
-        self._clip(track_index, slot_index).name = name
+    def cmd_set_clip_name(self, track_index, slot_index=None, *, arrangement_clip_index=None, name):
+        self._clip(track_index, slot_index, arrangement_clip_index).name = name
         return {"name": name}
 
-    def cmd_set_clip_color(self, track_index, slot_index, color_index):
-        self._clip(track_index, slot_index).color_index = int(color_index)
+    def cmd_set_clip_muted(self, track_index, slot_index=None, *, arrangement_clip_index=None, muted=True):
+        """Deactivate a clip (Live's clip activator, key 0), mostly for arrangement clips."""
+        c = self._clip(track_index, slot_index, arrangement_clip_index)
+        c.muted = bool(muted)
+        return {"muted": c.muted}
+
+    def cmd_set_clip_color(self, track_index, slot_index=None, *, arrangement_clip_index=None, color_index):
+        self._clip(track_index, slot_index, arrangement_clip_index).color_index = int(color_index)
         return {"color_index": int(color_index)}
 
     def cmd_fire_clip(self, track_index, slot_index):
@@ -560,9 +580,9 @@ class Handlers(object):
         self._slot(track_index, slot_index).stop()
         return {"stopped": True}
 
-    def cmd_set_clip_loop(self, track_index, slot_index, loop_start=None, loop_end=None, looping=None,
+    def cmd_set_clip_loop(self, track_index, slot_index=None, *, arrangement_clip_index=None, loop_start=None, loop_end=None, looping=None,
                           start_marker=None, end_marker=None):
-        c = self._clip(track_index, slot_index)
+        c = self._clip(track_index, slot_index, arrangement_clip_index)
         if looping is not None:
             c.looping = bool(looping)
         # Order matters: Live rejects loop_start >= loop_end.
@@ -581,16 +601,16 @@ class Handlers(object):
         return {"looping": c.looping, "loop_start": c.loop_start, "loop_end": c.loop_end,
                 "start_marker": c.start_marker, "end_marker": c.end_marker}
 
-    def cmd_duplicate_clip_loop(self, track_index, slot_index):
-        c = self._midi_clip(track_index, slot_index)
+    def cmd_duplicate_clip_loop(self, track_index, slot_index=None, arrangement_clip_index=None):
+        c = self._midi_clip(track_index, slot_index, arrangement_clip_index)
         c.duplicate_loop()
         return {"length": c.length}
 
-    def cmd_set_audio_clip_properties(self, track_index, slot_index, gain=None, pitch_coarse=None,
+    def cmd_set_audio_clip_properties(self, track_index, slot_index=None, *, arrangement_clip_index=None, gain=None, pitch_coarse=None,
                                       pitch_fine=None, warping=None, warp_mode=None):
         """gain: 0..1 normalized (Live's clip gain slider). warp_mode: 0 Beats, 1 Tones, 2 Texture,
         3 Re-Pitch, 4 Complex, 6 Complex Pro."""
-        c = self._clip(track_index, slot_index)
+        c = self._clip(track_index, slot_index, arrangement_clip_index)
         if not c.is_audio_clip:
             raise CommandError("clip is not an audio clip")
         if gain is not None:
@@ -608,14 +628,14 @@ class Handlers(object):
 
     # ----------------------------------------------------------------- notes
 
-    def cmd_get_notes(self, track_index, slot_index):
-        c = self._midi_clip(track_index, slot_index)
+    def cmd_get_notes(self, track_index, slot_index=None, arrangement_clip_index=None):
+        c = self._midi_clip(track_index, slot_index, arrangement_clip_index)
         notes = sorted(self._all_notes(c), key=lambda n: (n.start_time, n.pitch))
         return {"length": c.length, "notes": [self._note_dict(n) for n in notes]}
 
-    def cmd_add_notes(self, track_index, slot_index, notes, replace=False):
+    def cmd_add_notes(self, track_index, slot_index=None, *, arrangement_clip_index=None, notes, replace=False):
         """notes: [{pitch, start, duration, velocity?, mute?, probability?}]"""
-        c = self._midi_clip(track_index, slot_index)
+        c = self._midi_clip(track_index, slot_index, arrangement_clip_index)
         if replace:
             c.remove_notes_extended(0, 128, 0.0, c.length + 1e6)
         specs = []
@@ -633,9 +653,9 @@ class Handlers(object):
         c.add_new_notes(tuple(specs))
         return {"added": len(specs)}
 
-    def cmd_remove_notes(self, track_index, slot_index, from_pitch=0, pitch_span=128,
+    def cmd_remove_notes(self, track_index, slot_index=None, *, arrangement_clip_index=None, from_pitch=0, pitch_span=128,
                          from_time=0.0, time_span=None):
-        c = self._midi_clip(track_index, slot_index)
+        c = self._midi_clip(track_index, slot_index, arrangement_clip_index)
         if time_span is None:
             time_span = max(c.length, c.end_marker) + 1.0
         c.remove_notes_extended(int(from_pitch), int(pitch_span), float(from_time), float(time_span))
@@ -652,10 +672,10 @@ class Handlers(object):
         clip.apply_note_modifications(notes)
         return changed
 
-    def cmd_quantize_notes(self, track_index, slot_index, grid=0.25, amount=1.0, quantize_ends=False,
+    def cmd_quantize_notes(self, track_index, slot_index=None, *, arrangement_clip_index=None, grid=0.25, amount=1.0, quantize_ends=False,
                            pitch=None):
         """grid in beats: 0.25 = 1/16, 0.5 = 1/8, 1/3 = 1/8 triplet. amount 0..1."""
-        c = self._midi_clip(track_index, slot_index)
+        c = self._midi_clip(track_index, slot_index, arrangement_clip_index)
         grid = float(grid)
         amount = max(0.0, min(1.0, float(amount)))
 
@@ -670,9 +690,9 @@ class Handlers(object):
 
         return {"quantized": self._modify_notes(c, q, pitch)}
 
-    def cmd_humanize_notes(self, track_index, slot_index, timing=0.01, velocity=8, pitch=None, seed=None):
+    def cmd_humanize_notes(self, track_index, slot_index=None, *, arrangement_clip_index=None, timing=0.01, velocity=8, pitch=None, seed=None):
         """timing: max random shift in beats. velocity: max random velocity change."""
-        c = self._midi_clip(track_index, slot_index)
+        c = self._midi_clip(track_index, slot_index, arrangement_clip_index)
         rng = random.Random(seed)
         timing = abs(float(timing))
         velocity = abs(float(velocity))
@@ -683,8 +703,8 @@ class Handlers(object):
 
         return {"humanized": self._modify_notes(c, h, pitch)}
 
-    def cmd_transpose_notes(self, track_index, slot_index, semitones, pitch=None):
-        c = self._midi_clip(track_index, slot_index)
+    def cmd_transpose_notes(self, track_index, slot_index=None, *, arrangement_clip_index=None, semitones, pitch=None):
+        c = self._midi_clip(track_index, slot_index, arrangement_clip_index)
         semitones = int(semitones)
 
         def t(n):
@@ -692,8 +712,8 @@ class Handlers(object):
 
         return {"transposed": self._modify_notes(c, t, pitch)}
 
-    def cmd_scale_velocity(self, track_index, slot_index, factor=1.0, offset=0.0, pitch=None):
-        c = self._midi_clip(track_index, slot_index)
+    def cmd_scale_velocity(self, track_index, slot_index=None, *, arrangement_clip_index=None, factor=1.0, offset=0.0, pitch=None):
+        c = self._midi_clip(track_index, slot_index, arrangement_clip_index)
 
         def v(n):
             n.velocity = max(1.0, min(127.0, n.velocity * float(factor) + float(offset)))
@@ -969,13 +989,31 @@ class Handlers(object):
         t.create_midi_clip(float(start), float(length))
         return {"created": True, "start": float(start), "length": float(length)}
 
-    def cmd_delete_arrangement_clip(self, track_index, clip_index):
-        t = self._track(track_index)
-        clips = list(t.arrangement_clips)
-        if not 0 <= clip_index < len(clips):
-            raise CommandError("arrangement clip index out of range")
-        t.delete_clip(clips[clip_index])
-        return {"deleted": True}
+    def cmd_delete_arrangement_clip(self, track_index, arrangement_clip_index):
+        clip = self._clip(track_index, arrangement_clip_index=arrangement_clip_index)
+        name = clip.name
+        self._track(track_index).delete_clip(clip)
+        return {"deleted": name}
+
+    @staticmethod
+    def _arrangement_clip_summary(index, c):
+        info = {"arrangement_clip_index": index, "name": c.name, "start": c.start_time,
+                "end": c.end_time, "type": "midi" if c.is_midi_clip else "audio", "muted": c.muted}
+        if c.is_audio_clip:
+            info["file_path"] = c.file_path
+        return info
+
+    def cmd_get_arrangement_clips(self, track_index=None):
+        """Every clip in the Arrangement, per track (or one track), ordered by start time."""
+        indices = [track_index] if track_index is not None else range(len(self.song.tracks))
+        out = []
+        for i in indices:
+            t = self._track(i)
+            clips = self._arrangement_clips(t)
+            if clips or track_index is not None:
+                out.append({"track_index": i, "track": t.name,
+                            "clips": [self._arrangement_clip_summary(n, c) for n, c in enumerate(clips)]})
+        return out
 
     def cmd_back_to_arrangement(self):
         self.song.back_to_arranger = False
