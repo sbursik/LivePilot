@@ -142,7 +142,8 @@ def test_arrangement_clips(live):
     track.arrangement_clips = [late, early]
 
     listing = conn.send("get_arrangement_clips")
-    assert [c["name"] for c in listing[0]["clips"]] == ["Intro", "Drop"]
+    assert [(c["track_index"], c["arrangement_clip_index"], c["name"]) for c in listing] == [
+        (0, 0, "Intro"), (0, 1, "Drop")]
     assert conn.send("get_track_info", track_index=0)["arrangement_clips"][1]["name"] == "Drop"
 
     info = conn.send("get_clip_info", track_index=0, arrangement_clip_index=1)
@@ -173,7 +174,8 @@ def test_arrangement_listing_skips_group_tracks(live):
     song.tracks[1].arrangement_clips = [clip]
 
     listing = conn.send("get_arrangement_clips")
-    assert [(t["track_index"], [c["name"] for c in t["clips"]]) for t in listing] == [(1, ["Vox"])]
+    assert [(c["track_index"], c["track"], c["name"]) for c in listing] == [(1, "1-MIDI", "Vox")]
+    assert conn.send("get_arrangement_clips", track_index=0) == []
     assert conn.send("get_track_info", track_index=0)["arrangement_clips"] == []
     with pytest.raises(LiveError, match="out of range"):
         conn.send("get_clip_info", track_index=0, arrangement_clip_index=0)

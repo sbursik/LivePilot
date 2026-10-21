@@ -1011,15 +1011,17 @@ class Handlers(object):
         return info
 
     def cmd_get_arrangement_clips(self, track_index=None):
-        """Every clip in the Arrangement, per track (or one track), ordered by start time."""
+        """Every clip in the Arrangement (or on one track) as a flat list, ordered by track and
+        then start time. arrangement_clip_index counts per track, so a clip is addressed by
+        track_index plus arrangement_clip_index."""
         indices = [track_index] if track_index is not None else range(len(self.song.tracks))
         out = []
         for i in indices:
             t = self._track(i)
-            clips = self._arrangement_clips(t)
-            if clips or track_index is not None:
-                out.append({"track_index": i, "track": t.name,
-                            "clips": [self._arrangement_clip_summary(n, c) for n, c in enumerate(clips)]})
+            for n, c in enumerate(self._arrangement_clips(t)):
+                info = {"track_index": i, "track": t.name}
+                info.update(self._arrangement_clip_summary(n, c))
+                out.append(info)
         return out
 
     def cmd_back_to_arrangement(self):

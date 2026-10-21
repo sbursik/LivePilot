@@ -243,9 +243,10 @@ def get_clip_info(track_index: int, slot_index: int | None = None,
 
 @mcp.tool()
 def get_arrangement_clips(track_index: int | None = None) -> list:
-    """List every clip in the Arrangement (or on one track) with its arrangement_clip_index,
-    start/end in beats, type, mute state and, for audio, file path. Use this before editing
-    arrangement clips such as vocals."""
+    """List every clip in the Arrangement (or on one track) as one flat list, ordered by track
+    then start time. Each entry has track_index, track name, arrangement_clip_index (counted per
+    track), start/end in beats, type, mute state and, for audio, file path. Use this before
+    editing arrangement clips such as vocals."""
     return _send("get_arrangement_clips", track_index=track_index)
 
 
