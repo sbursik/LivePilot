@@ -242,3 +242,48 @@ def test_analyser_tools_end_to_end(live, monkeypatch, tmp_path):
 
     song.tracks[0].clip_slots[0].create_clip(4)
     assert "MIDI clip" in call("analyze_clip", {"track_index": 0, "slot_index": 0})["error"]
+
+
+def test_locators_land_where_asked_not_at_the_old_playhead(live):
+    conn, song = live
+    song._song_time = 8.0  # playhead somewhere else, as in a real session
+
+    added = conn.send("add_locator", time=32.0, name="Drop")
+    assert added["name"] == "Drop" and added["time"] == 32.0
+    conn.send("add_locator", time=0.0, name="Intro")
+    conn.send("add_locator", time=64.0, name="Outro")
+    listing = conn.send("get_locators")
+    assert [(c["time"], c["name"]) for c in listing] == [(0.0, "Intro"), (32.0, "Drop"), (64.0, "Outro")]
+    assert conn.send("get_session_info")["song_time"] == 8.0  # playhead restored
+
+    # Adding where one exists renames it instead of toggling it away.
+    assert conn.send("add_locator", time=32.0, name="Drop 1")["existing"] is True
+
+    deleted = conn.send("delete_locator", index=1)
+    assert deleted["deleted"] == "Drop 1"
+    assert [c["name"] for c in deleted["locators"]] == ["Intro", "Outro"]
+
+    conn.send("rename_locator", index=1, name="End")
+    assert [c["name"] for c in conn.send("get_locators")] == ["Intro", "End"]
+
+    song.is_playing = True
+    with pytest.raises(LiveError, match="stop playback first"):
+        conn.send("add_locator", time=16.0)
+    assert len(song.cue_points) == 2
+
+
+def test_other_clients_still_complete_during_a_multi_tick_command(live):
+    """A command from a second client queues behind add_locator and still completes (no deadlock)."""
+    conn, song = live
+    other = LiveConnection(port=TEST_PORT, timeout=5)
+    results = {}
+
+    def add():
+        results["add"] = conn.send("add_locator", time=48.0, name="Break")
+
+    worker = threading.Thread(target=add)
+    worker.start()
+    tempo = other.send("set_tempo", bpm=130)
+    worker.join()
+    other.close()
+    assert results["add"]["time"] == 48.0 and tempo["tempo"] == 130

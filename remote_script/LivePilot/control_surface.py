@@ -2,7 +2,8 @@
 
 Live's API may only be touched from Live's main thread. Socket threads put
 commands on a queue; update_display() (called by Live roughly every 100 ms
-on the main thread) drains the queue and runs each command.
+on the main thread) drains the queue and runs each command. Commands that
+must wait for Live to apply a change run across several ticks (see _dispatch).
 
 Wire protocol: newline-delimited JSON.
   request:  {"id": 1, "type": "set_tempo", "params": {"bpm": 124}}
@@ -14,6 +15,7 @@ import queue
 import socket
 import threading
 import traceback
+import types
 
 from _Framework.ControlSurface import ControlSurface
 
@@ -22,12 +24,14 @@ from .handlers import Handlers
 HOST = "127.0.0.1"
 PORT = 9877
 COMMAND_TIMEOUT = 20.0
+MAX_COMMAND_TICKS = 50  # ~5 s at Live's ~10 Hz update rate
 
 
 class LivePilot(ControlSurface):
     def __init__(self, c_instance):
         ControlSurface.__init__(self, c_instance)
         self._commands = queue.Queue()
+        self._pending = None  # (msg, reply, generator, steps) of a multi-tick command
         self._handlers = Handlers(self)
         self._running = True
         self._server = None
@@ -103,23 +107,56 @@ class LivePilot(ControlSurface):
 
     def update_display(self):
         ControlSurface.update_display(self)
+        # A multi-tick command (see _dispatch) owns the main thread until it finishes, so
+        # commands can't interleave with it, e.g. two locator commands moving the playhead.
+        if self._pending is not None:
+            if not self._advance():
+                return
         while True:
             try:
                 msg, reply = self._commands.get_nowait()
             except queue.Empty:
                 break
-            reply.put(self._dispatch(msg))
+            if self._dispatch(msg, reply):
+                return  # started a multi-tick command; the rest of the queue waits
 
-    def _dispatch(self, msg):
-        cmd_id = msg.get("id")
-        cmd = msg.get("type")
-        params = msg.get("params") or {}
+    def _dispatch(self, msg, reply):
+        """Run a command and reply. A handler that is a generator runs one step per update tick,
+        which lets it wait for Live to apply a change (Live applies some setters, like the
+        playhead position, only on a later tick). Returns True if the command is still running."""
         try:
-            result = self._handlers.run(cmd, params)
-            return {"id": cmd_id, "status": "ok", "result": result}
+            result = self._handlers.run(msg.get("type"), msg.get("params") or {})
         except Exception as e:
-            self.log_message("LivePilot: error in %s\n%s" % (cmd, traceback.format_exc()))
-            return {"id": cmd_id, "status": "error", "error": "%s: %s" % (type(e).__name__, e)}
+            reply.put(self._error(msg, e))
+            return False
+        if isinstance(result, types.GeneratorType):
+            self._pending = (msg, reply, result, 0)
+            return not self._advance()
+        reply.put({"id": msg.get("id"), "status": "ok", "result": result})
+        return False
+
+    def _advance(self):
+        """Step the pending command once. Returns True when it has finished and replied."""
+        msg, reply, gen, steps = self._pending
+        try:
+            if steps >= MAX_COMMAND_TICKS:
+                raise RuntimeError("command did not finish within %d update ticks" % MAX_COMMAND_TICKS)
+            next(gen)
+        except StopIteration as done:
+            response = {"id": msg.get("id"), "status": "ok", "result": done.value}
+        except Exception as e:
+            gen.close()
+            response = self._error(msg, e)
+        else:
+            self._pending = (msg, reply, gen, steps + 1)
+            return False
+        self._pending = None
+        reply.put(response)
+        return True
+
+    def _error(self, msg, e):
+        self.log_message("LivePilot: error in %s\n%s" % (msg.get("type"), traceback.format_exc()))
+        return {"id": msg.get("id"), "status": "error", "error": "%s: %s" % (type(e).__name__, e)}
 
     def disconnect(self):
         self._running = False

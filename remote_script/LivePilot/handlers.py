@@ -947,37 +947,83 @@ class Handlers(object):
 
     # =========================================================== arrangement
 
+    # Live's API can only create or remove a locator by toggling one at the playhead
+    # (set_or_delete_cue); a cue's time is read-only. The playhead position is applied on a later
+    # update tick, so these commands are generators: they move the playhead, wait until Live
+    # reports it there, toggle, wait for the cue list to update, verify, then restore the playhead.
+
+    def _cues(self):
+        return sorted(self.song.cue_points, key=lambda c: c.time)
+
+    def _cue_at(self, time):
+        for c in self.song.cue_points:
+            if abs(c.time - time) < 1e-3:
+                return c
+        return None
+
+    def _locator_list(self):
+        return [{"index": i, "name": c.name, "time": c.time} for i, c in enumerate(self._cues())]
+
+    def _move_playhead(self, time, ticks=20):
+        if self.song.is_playing:
+            raise CommandError("stop playback first: Live places locators at the playhead, "
+                               "which moves while playing")
+        self.song.current_song_time = time
+        for _ in range(ticks):
+            yield
+            if abs(self.song.current_song_time - time) < 1e-6:
+                return
+        raise CommandError("Live did not move the playhead to %s" % time)
+
     def cmd_get_locators(self):
-        return [{"index": i, "name": c.name, "time": c.time} for i, c in enumerate(self.song.cue_points)]
+        """Locators ordered by time; index is the position in this list."""
+        return self._locator_list()
 
     def cmd_add_locator(self, time, name=None):
         time = float(time)
-        for c in self.song.cue_points:
-            if abs(c.time - time) < 1e-6:
-                if name:
-                    c.name = name
-                return {"name": c.name, "time": c.time, "existing": True}
-        self.song.current_song_time = time
+        existing = self._cue_at(time)
+        if existing is not None:
+            if name:
+                existing.name = name
+            return {"name": existing.name, "time": existing.time, "existing": True}
+        original = self.song.current_song_time
+        yield from self._move_playhead(time)
         self.song.set_or_delete_cue()
-        for c in self.song.cue_points:
-            if abs(c.time - time) < 1e-3:
-                if name:
-                    c.name = name
-                return {"name": c.name, "time": c.time}
-        return {"time": time, "note": "locator requested; Live may place it on the next update"}
+        yield
+        cue = self._cue_at(time)
+        self.song.current_song_time = original
+        if cue is None:
+            raise CommandError("Live did not create a locator at %s" % time)
+        if name:
+            cue.name = name
+        return {"name": cue.name, "time": cue.time, "locators": self._locator_list()}
 
     def cmd_delete_locator(self, index):
-        cues = list(self.song.cue_points)
+        cues = self._cues()
         if not 0 <= index < len(cues):
-            raise CommandError("locator index out of range")
-        self.song.current_song_time = cues[index].time
+            raise CommandError("locator index %d out of range (%d locators)" % (index, len(cues)))
+        target = cues[index]
+        name, time = target.name, target.time
+        original = self.song.current_song_time
+        yield from self._move_playhead(time)
         self.song.set_or_delete_cue()
-        return {"deleted": True}
+        yield
+        self.song.current_song_time = original
+        if self._cue_at(time) is not None:
+            raise CommandError("Live did not remove the locator at %s" % time)
+        return {"deleted": name, "time": time, "locators": self._locator_list()}
+
+    def cmd_rename_locator(self, index, name):
+        cues = self._cues()
+        if not 0 <= index < len(cues):
+            raise CommandError("locator index %d out of range (%d locators)" % (index, len(cues)))
+        cues[index].name = name
+        return {"name": name, "time": cues[index].time}
 
     def cmd_jump_to_locator(self, index):
-        cues = list(self.song.cue_points)
+        cues = self._cues()
         if not 0 <= index < len(cues):
-            raise CommandError("locator index out of range")
+            raise CommandError("locator index %d out of range (%d locators)" % (index, len(cues)))
         cues[index].jump()
         return {"song_time": cues[index].time}
 

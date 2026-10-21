@@ -604,14 +604,18 @@ def plugin_presets(track_index: int, device_index: int, select_index: int | None
 # ------------------------------------------------------------ arrangement
 
 @mcp.tool()
-def manage_locator(action: Literal["list", "add", "delete", "jump"], time: float | None = None,
+def manage_locator(action: Literal["list", "add", "rename", "delete", "jump"], time: float | None = None,
                    name: str | None = None, index: int | None = None) -> dict:
-    """Arrangement locators: list them, add one at `time` (beats) with an optional name
-    (e.g. 'Intro', 'Drop'), delete one by index, or jump the playhead to one."""
+    """Arrangement locators, indexed in time order: list them, add one at `time` (beats) with an
+    optional name (e.g. 'Intro', 'Drop'; adding where one exists renames it), rename or delete one
+    by index, or jump the playhead to one. Adding and deleting need playback stopped, because
+    Live places locators at the playhead; the playhead is put back afterwards."""
     if action == "list":
         return {"locators": _send("get_locators")}
     if action == "add":
         return _send("add_locator", time=time, name=name)
+    if action == "rename":
+        return _send("rename_locator", index=index, name=name)
     if action == "delete":
         return _send("delete_locator", index=index)
     return _send("jump_to_locator", index=index)

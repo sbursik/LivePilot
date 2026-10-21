@@ -113,12 +113,41 @@ class FakeGroupTrack(FakeTrack):
         pass
 
 
+class FakeCue:
+    def __init__(self, song, time, name=""):
+        self._song, self.time, self.name = song, time, name
+
+    def jump(self):
+        self._song.current_song_time = self.time
+
+
 class FakeSong:
+    # Like Live, a new playhead position is only applied on the next update tick, and reading
+    # current_song_time returns the old position until then.
+    @property
+    def current_song_time(self):
+        return self._song_time
+
+    @current_song_time.setter
+    def current_song_time(self, value):
+        self._pending_time = value
+
+    def tick(self):
+        if self._pending_time is not None:
+            self._song_time, self._pending_time = self._pending_time, None
+
+    def set_or_delete_cue(self):
+        at = [c for c in self.cue_points if c.time == self._song_time]
+        if at:
+            self.cue_points.remove(at[0])
+        else:
+            self.cue_points.append(FakeCue(self, self._song_time))
+
     def __init__(self):
         self.tempo = 120.0
         self.signature_numerator = self.signature_denominator = 4
         self.is_playing = False
-        self.current_song_time = 0.0
+        self._song_time, self._pending_time = 0.0, None
         self.loop, self.loop_start, self.loop_length = False, 0.0, 16.0
         self.metronome = False
         self.tracks = [FakeTrack("1-MIDI")]
@@ -159,7 +188,7 @@ class FakeControlSurface:
         self.messages.append(msg)
 
     def update_display(self):
-        pass
+        self._song.tick()
 
     def disconnect(self):
         pass
