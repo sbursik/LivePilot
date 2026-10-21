@@ -75,7 +75,14 @@ class Handlers(object):
 
     @staticmethod
     def _arrangement_clips(track):
-        return sorted(getattr(track, "arrangement_clips", []), key=lambda c: c.start_time)
+        # Live raises RuntimeError (not AttributeError) for group, return and main tracks.
+        if getattr(track, "is_foldable", False):
+            return []
+        try:
+            clips = track.arrangement_clips
+        except RuntimeError:
+            return []
+        return sorted(clips, key=lambda c: c.start_time)
 
     def _midi_clip(self, track_index, slot_index=None, arrangement_clip_index=None):
         clip = self._clip(track_index, slot_index, arrangement_clip_index)

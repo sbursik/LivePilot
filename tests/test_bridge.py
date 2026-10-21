@@ -163,3 +163,17 @@ def test_arrangement_clips(live):
         conn.send("get_clip_info", track_index=0, arrangement_clip_index=5)
     with pytest.raises(LiveError, match="pass slot_index"):
         conn.send("get_notes", track_index=0)
+
+
+def test_arrangement_listing_skips_group_tracks(live):
+    conn, song = live
+    song.tracks.insert(0, fake_live.FakeGroupTrack("Drums Group"))
+    clip = fake_live.FakeClip(4, start_time=0.0)
+    clip.name = "Vox"
+    song.tracks[1].arrangement_clips = [clip]
+
+    listing = conn.send("get_arrangement_clips")
+    assert [(t["track_index"], [c["name"] for c in t["clips"]]) for t in listing] == [(1, ["Vox"])]
+    assert conn.send("get_track_info", track_index=0)["arrangement_clips"] == []
+    with pytest.raises(LiveError, match="out of range"):
+        conn.send("get_clip_info", track_index=0, arrangement_clip_index=0)

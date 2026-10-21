@@ -99,6 +99,19 @@ class FakeTrack:
         self.arrangement_clips.remove(clip)
 
 
+class FakeGroupTrack(FakeTrack):
+    is_foldable = True
+    can_be_armed = False
+
+    @property
+    def arrangement_clips(self):
+        raise RuntimeError("Main, Group and Return Tracks have no arrangement clips")
+
+    @arrangement_clips.setter
+    def arrangement_clips(self, value):
+        pass
+
+
 class FakeSong:
     def __init__(self):
         self.tempo = 120.0
