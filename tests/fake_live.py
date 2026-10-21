@@ -181,6 +181,9 @@ class FakeSong:
             self.tracks.insert(index, t)
 
     def move_device(self, device, target, position):
+        # Like Live, position is an insertion point counted before the device leaves its chain.
+        if device in target.devices and target.devices.index(device) < position:
+            position -= 1
         for t in self.tracks + self.return_tracks + [self.master_track]:
             if device in t.devices:
                 t.devices.remove(device)

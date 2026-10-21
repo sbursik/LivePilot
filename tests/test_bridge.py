@@ -335,3 +335,8 @@ def test_load_at_position_and_move_device(live, monkeypatch):
     assert loaded["devices"] == ["EQ Eight", "Ozone 11"]
     moved = conn.send("move_device", track_index=0, device_index=0, position=1)
     assert moved["devices"] == ["Ozone 11", "EQ Eight"]
+    track.devices.append(fake_live.FakeDevice("Utility"))
+    moved = conn.send("move_device", track_index=0, device_index=0, position=1)
+    assert moved["devices"] == ["EQ Eight", "Ozone 11", "Utility"]
+    moved = conn.send("move_device", track_index=0, device_index=2, position=0)
+    assert moved["devices"] == ["Utility", "EQ Eight", "Ozone 11"]

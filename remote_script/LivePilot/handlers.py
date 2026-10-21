@@ -1011,7 +1011,16 @@ class Handlers(object):
     def _move_device(self, device, target, position):
         if not hasattr(self.song, "move_device"):
             raise CommandError("this Live version can't move devices from a script (needs Live 11+)")
-        position = max(0, min(int(position), len(target.devices)))
+        chain = [_ptr(d) for d in target.devices]
+        current = chain.index(_ptr(device)) if _ptr(device) in chain else None
+        if current is None:
+            position = max(0, min(int(position), len(chain)))
+        else:
+            # Live counts the insertion point before taking the device out of its own chain, so a
+            # move to a later slot needs one more to land at `position`.
+            position = max(0, min(int(position), len(chain) - 1))
+            if position > current:
+                position += 1
         self.song.move_device(device, target, position)
 
     def cmd_move_device(self, track_index, device_index, position, kind="track",
