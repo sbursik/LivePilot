@@ -11,6 +11,15 @@ import Live
 TRACK_KINDS = ("track", "return", "master")
 _EXT_RE = re.compile(r"\.(adg|adv|amxd|alc|als|vst3|vst|component|dll|wav|aif|aiff|mp3|flac|ogg)$")
 _DB_RE = re.compile(r"(-?inf|-?\d+(?:\.\d+)?)\s*dB", re.IGNORECASE)
+_DISPLAY_RE = re.compile(r"^\s*(-?inf|[-+]?\d*\.?\d+)\s*([a-z%]*)", re.IGNORECASE)
+# Display units normalised to one base unit each, so "950 Hz" and "1.20 kHz" compare.
+_UNITS = {"hz": ("hz", 1.0), "khz": ("hz", 1000.0), "ms": ("ms", 1.0), "s": ("ms", 1000.0),
+          "db": ("db", 1.0), "%": ("%", 1.0), "l": ("pan", -1.0), "r": ("pan", 1.0), "": ("", 1.0)}
+
+
+def _ptr(obj):
+    """Stable identity for a Live object: the Python wrappers differ between reads."""
+    return getattr(obj, "_live_ptr", id(obj))
 
 
 class CommandError(Exception):
@@ -138,20 +147,55 @@ class Handlers(object):
             return float("-inf")
         return float(v)
 
-    def _set_param_db(self, param, db):
-        """Bisect the parameter's range until its display string reads `db`."""
+    @staticmethod
+    def _parse_display(text):
+        """'1.20 kHz' -> (1200.0, 'hz'), '-18.0 dB' -> (-18.0, 'db'), '25L' -> (-25.0, 'pan'),
+        'C' -> (0.0, 'pan'). None if the text has no leading number or an unknown unit."""
+        t = text.strip().lower()
+        if t == "c":
+            return 0.0, "pan"
+        m = _DISPLAY_RE.match(t)
+        if not m or m.group(2) not in _UNITS:
+            return None
+        unit, scale = _UNITS[m.group(2)]
+        return float(m.group(1)) * scale, unit
+
+    def _set_param_display(self, param, text):
+        """Set a continuous parameter to the value whose display reads `text` ('350 Hz', '-18 dB',
+        '150 ms', '25L'), by bisecting its range. Assumes the display is monotonic, as it is for
+        Live's frequency, gain, time and ratio controls."""
+        target = self._parse_display(text)
+        if target is None:
+            raise CommandError("can't read %r as a value with a unit (e.g. '350 Hz', '-18 dB', '150 ms')"
+                               % text)
+        lo_d, hi_d = (self._parse_display(param.str_for_value(v)) for v in (param.min, param.max))
+        if lo_d is None or hi_d is None:
+            raise CommandError("%s displays %r..%r, which can't be set by display value; pass value"
+                               % (param.name, param.str_for_value(param.min), param.str_for_value(param.max)))
+        if target[1] and target[1] != lo_d[1]:
+            raise CommandError("%s is shown in %r, not %r" % (param.name, param.str_for_value(param.max), text))
+        goal, rising = target[0], hi_d[0] >= lo_d[0]
+        if goal in (float("inf"), float("-inf")):
+            param.value = param.max if (goal > 0) == rising else param.min
+            return param.str_for_value(param.value)
         lo, hi = param.min, param.max
-        if self._parse_db(param.str_for_value(hi)) is None:
-            raise CommandError("parameter %s does not display dB" % param.name)
         for _ in range(40):
             mid = (lo + hi) / 2.0
-            cur = self._parse_db(param.str_for_value(mid))
-            if cur is None or cur < db:
+            cur = self._parse_display(param.str_for_value(mid))
+            below = cur is None or cur[0] < goal
+            if below == rising:
                 lo = mid
             else:
                 hi = mid
-        param.value = hi
+        near = [(abs(d[0] - goal), v) for v in (lo, hi)
+                for d in [self._parse_display(param.str_for_value(v))] if d is not None]
+        param.value = min(near)[1] if near else hi
         return param.str_for_value(param.value)
+
+    def _set_param_db(self, param, db):
+        if self._parse_db(param.str_for_value(param.max)) is None:
+            raise CommandError("parameter %s does not display dB" % param.name)
+        return self._set_param_display(param, "%s dB" % db)
 
     @staticmethod
     def _set_param(param, value):
@@ -791,15 +835,19 @@ class Handlers(object):
 
     def cmd_set_device_parameter(self, track_index, device_index, parameter, value=None, display_value=None,
                                  kind="track"):
-        """parameter: index or name. value: raw value. display_value: an entry of value_items
-        for quantized parameters (e.g. 'On')."""
+        """parameter: index or name. value: raw value. display_value: what the parameter should
+        show: an entry of value_items for switches and menus ('On'), or a number with its unit for
+        continuous controls ('350 Hz', '2.5 kHz', '-18 dB', '150 ms', '25L')."""
         d = self._device(track_index, device_index, kind)
         p = self._find_param(d, parameter)
-        if display_value is not None:
+        if display_value is not None and p.is_quantized:
             items = list(p.value_items)
-            if display_value not in items:
+            lowered = [i.lower() for i in items]
+            if str(display_value).lower() not in lowered:
                 raise CommandError("%r not in %s" % (display_value, items))
-            p.value = p.min + items.index(display_value)
+            p.value = p.min + lowered.index(str(display_value).lower())
+        elif display_value is not None:
+            self._set_param_display(p, str(display_value))
         elif value is not None:
             self._set_param(p, value)
         else:
@@ -933,17 +981,47 @@ class Handlers(object):
         return {"results": results[:max_results], "total_matches": len(results),
                 "truncated_categories": truncated}
 
-    def cmd_load_browser_item(self, uri, track_index=None, kind="track"):
+    def cmd_load_browser_item(self, uri, track_index=None, kind="track", position=None):
         """Load an item (device, preset, sample) onto a track, like double-clicking it in the browser.
-        uri must come from search_browser or browse."""
+        uri must come from search_browser or browse. position: where the new device goes in the
+        chain (0 = first); Live adds it at the end, so it is moved there after loading."""
         item = self._browser_cache.get(uri)
         if item is None:
             raise CommandError("unknown uri; call search_browser or browse first")
         if track_index is not None:
             self.song.view.selected_track = self._track(track_index, kind)
-        self.browser.load_item(item)
         t = self.song.view.selected_track
-        return {"loaded": item.name, "track": t.name, "devices": [d.name for d in t.devices]}
+        before = [_ptr(d) for d in t.devices]
+        self.browser.load_item(item)
+        result = {"loaded": item.name, "track": t.name}
+        if position is not None:
+            # A plugin can take a few ticks to appear in the chain.
+            for _ in range(20):
+                if len(t.devices) > len(before):
+                    break
+                yield
+            new = [i for i, d in enumerate(t.devices) if _ptr(d) not in before]
+            if not new:
+                result["note"] = "no new device appeared on the track, so nothing was moved"
+            else:
+                self._move_device(t.devices[new[0]], t, position)
+        result["devices"] = [d.name for d in t.devices]
+        return result
+
+    def _move_device(self, device, target, position):
+        if not hasattr(self.song, "move_device"):
+            raise CommandError("this Live version can't move devices from a script (needs Live 11+)")
+        position = max(0, min(int(position), len(target.devices)))
+        self.song.move_device(device, target, position)
+
+    def cmd_move_device(self, track_index, device_index, position, kind="track",
+                        target_track_index=None, target_kind=None):
+        """Move a device to `position` in its own chain or another track's chain (0 = first)."""
+        device = self._device(track_index, device_index, kind)
+        target = self._track(track_index if target_track_index is None else target_track_index,
+                             target_kind or kind)
+        self._move_device(device, target, position)
+        return {"track": target.name, "devices": [d.name for d in target.devices]}
 
     # =========================================================== arrangement
 

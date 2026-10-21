@@ -16,8 +16,16 @@ Working style:
   with get_arrangement_clips.
 - Generators give a starting point. Shape the result with add_notes and edit_notes (vary bars,
   add ghost notes, adjust velocities) instead of leaving raw patterns.
-- Plugin parameters are only reachable if Live exposes them (get_device_parameters). For big
-  synths like Serum, Live shows parameters only after the user adds them with Configure.
+- Plugin parameters are only reachable if Live exposes them (get_device_parameters). Big synths
+  (Serum) and mastering or mixing suites (Ozone, Neutron, FabFilter) often expose only a few
+  until the user adds them with Configure in the device title bar. Say so rather than guessing.
+- Signal flow: a track's devices run first, then its volume fader and pan, then sends (post-fader
+  by default). On the master track, the master fader comes after the master devices, so turning
+  it down doesn't give a limiter or Ozone more headroom. Use a Utility first in the chain
+  (position=0) for gain before the master chain.
+- Live's script API can't export, render, bounce or freeze audio. The analyser reads source
+  files before any effects, so to check processed audio ask the user to export (or bounce) and
+  pass the file to analyze_audio_file.
 - You can't hear audio. Before judging or changing a mix, measure it with the analyser tools
   (analyze_clip, analyze_audio_file, compare_to_reference, analyze_frequency_space,
   score_samples) and base decisions on those numbers.
@@ -500,10 +508,22 @@ def get_device_parameters(track_index: int, device_index: int, kind: TrackKind =
 def set_device_parameter(track_index: int, device_index: int, parameter: int | str,
                          value: float | None = None, display_value: str | None = None,
                          kind: TrackKind = "track") -> dict:
-    """Set a device parameter by index or name. value is the raw value (check min/max with
-    get_device_parameters). For switch/menu parameters you can pass display_value (e.g. 'On')."""
+    """Set a device parameter by index or name. Prefer display_value, what the control should
+    show: a number with its unit for continuous controls ('350 Hz', '2.5 kHz', '-18 dB',
+    '150 ms', '1.5 s', '30 %', '25L', 'C'), or a menu entry for switches and menus ('On').
+    The result's display shows what Live set. value is the raw value (min/max from
+    get_device_parameters), and is often not linear in Hz, dB or ms."""
     return _send("set_device_parameter", track_index=track_index, device_index=device_index,
                  parameter=parameter, value=value, display_value=display_value, kind=kind)
+
+
+@mcp.tool()
+def move_device(track_index: int, device_index: int, position: int, kind: TrackKind = "track",
+                target_track_index: int | None = None, target_kind: TrackKind | None = None) -> dict:
+    """Move a device to another position in its chain (0 = first), e.g. an EQ before a
+    compressor, or to another track's chain with target_track_index/target_kind."""
+    return _send("move_device", track_index=track_index, device_index=device_index, position=position,
+                 kind=kind, target_track_index=target_track_index, target_kind=target_kind)
 
 
 @mcp.tool()
@@ -549,10 +569,12 @@ def browse(category: Literal["instruments", "audio_effects", "midi_effects", "dr
 
 
 @mcp.tool()
-def load_browser_item(uri: str, track_index: int | None = None, kind: TrackKind = "track") -> dict:
+def load_browser_item(uri: str, track_index: int | None = None, kind: TrackKind = "track",
+                      position: int | None = None) -> dict:
     """Load a browser item (instrument, effect, preset, drum kit, sample) onto a track.
-    Get the uri from search_browser or browse. Effects are added after the existing devices."""
-    return _send("load_browser_item", uri=uri, track_index=track_index, kind=kind)
+    Get the uri from search_browser or browse. Effects go at the end of the chain unless you
+    pass position (0 = first device), e.g. to put a Utility before a limiter."""
+    return _send("load_browser_item", uri=uri, track_index=track_index, kind=kind, position=position)
 
 
 _LOAD_ORDER = {
@@ -566,12 +588,13 @@ _LOAD_ORDER = {
 @mcp.tool()
 def load_device_by_name(name: str, track_index: int,
                         type: Literal["instrument", "audio_effect", "midi_effect", "any"] = "any",
-                        kind: TrackKind = "track") -> dict:
+                        kind: TrackKind = "track", position: int | None = None) -> dict:
     """Find a device, plugin or preset by name and load the best match onto a track. Works for
     Live devices ('Operator', 'EQ Eight', 'Compressor'), presets and kits ('808 Core Kit'), and
     third-party plugins ('Serum 2', 'Diva', 'Pro-Q 3'). When the user names a plugin, always load
     it with this tool rather than substituting a Live instrument. If nothing matches, report that
-    instead of loading something else."""
+    instead of loading something else. Effects go at the end of the chain unless you pass
+    position (0 = first device)."""
     found: list[dict] = []
     for category in _LOAD_ORDER[type]:
         found = _send("search_browser", query=name, category=category, max_results=10)["results"]
@@ -581,7 +604,8 @@ def load_device_by_name(name: str, track_index: int,
         return {"error": f"nothing named {name!r} found in Live's browser. If it's a plugin, check it "
                          "is installed and enabled under Settings > Plug-Ins and rescan."}
     pick = found[0]
-    result = _send("load_browser_item", uri=pick["uri"], track_index=track_index, kind=kind)
+    result = _send("load_browser_item", uri=pick["uri"], track_index=track_index, kind=kind,
+                   position=position)
     result["matched"] = pick["name"]
     if pick["rank"] != 0:
         result["note"] = f"no exact match for {name!r}; loaded closest: {pick['name']}"
@@ -774,10 +798,37 @@ def _context_files(context_paths: list[str] | None) -> list[tuple[str, str]]:
     return out
 
 
-def _unmeasured_tracks() -> list[str]:
-    """Unmuted MIDI tracks: they make sound in the set but have no audio file to measure."""
-    tracks = _send("get_session_info", include_clips=False)["tracks"]
-    return [t["name"] for t in tracks if t["type"] == "midi" and not t["mute"]]
+def _merge_ranges(ranges: list[list[float]]) -> list[list[float]]:
+    out: list[list[float]] = []
+    for a, b in sorted(ranges):
+        if out and a <= out[-1][1] + 1e-6:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b])
+    return out
+
+
+def _unmeasured_tracks() -> list[dict]:
+    """MIDI tracks that actually make sound but have no audio file to measure: unmuted, with
+    active (not deactivated) Arrangement clips or a playing Session clip. Each entry gives the
+    beat ranges that are missing from the map."""
+    tracks = _send("get_session_info", include_clips=True)["tracks"]
+    ranges: dict[int, list[list[float]]] = {}
+    for c in _send("get_arrangement_clips"):
+        if c["type"] == "midi" and not c["muted"]:
+            ranges.setdefault(c["track_index"], []).append([c["start"], c["end"]])
+    out = []
+    for i, t in enumerate(tracks):
+        if t["type"] != "midi" or t["mute"]:
+            continue
+        entry: dict = {"track": t["name"]}
+        if i in ranges:
+            entry["beats"] = _merge_ranges(ranges[i])
+        if any(c.get("playing") for c in t.get("clips", [])):
+            entry["session_clip_playing"] = True
+        if len(entry) > 1:
+            out.append(entry)
+    return out
 
 
 def _space(context_paths: list[str] | None) -> tuple[dict, list[str]]:
@@ -796,7 +847,9 @@ def _space(context_paths: list[str] | None) -> tuple[dict, list[str]]:
         missing = _unmeasured_tracks()
         if missing:
             space["not_measured"] = missing
-            space["warning"] = (f"{len(missing)} MIDI/instrument track(s) aren't in this map ({', '.join(missing)}). "
+            names = ", ".join(m["track"] for m in missing)
+            space["warning"] = (f"{len(missing)} MIDI/instrument track(s) with active clips aren't in this map "
+                                f"({names}; see not_measured for the beat ranges). "
                                 "Bands they fill (e.g. a synth bass) may show as open when they aren't. "
                                 "For an accurate map, export or bounce those tracks and pass the files "
                                 "as context_paths together with the other stems.")

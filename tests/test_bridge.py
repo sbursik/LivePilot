@@ -233,8 +233,13 @@ def test_analyser_tools_end_to_end(live, monkeypatch, tmp_path):
     clip = call("analyze_clip", {"track_index": 1, "slot_index": 0})
     assert clip["clip"]["region"]["description"].startswith("whole file") and clip["spectrum"]["bands"]
 
+    # The MIDI track makes sound only where it has active Arrangement clips.
+    midi = song.tracks[0]
+    assert "not_measured" not in call("analyze_frequency_space", {})
+    midi.arrangement_clips = [fake_live.FakeClip(8, 0.0), fake_live.FakeClip(8, 8.0), fake_live.FakeClip(16, 32.0)]
+    midi.arrangement_clips[2].muted = True
     space = call("analyze_frequency_space", {})
-    assert space["files"] == 1 and space["not_measured"] == ["1-MIDI"]
+    assert space["files"] == 1 and space["not_measured"] == [{"track": "1-MIDI", "beats": [[0.0, 16.0]]}]
 
     ranked = call("score_samples", {"candidate_paths": [hats_path, vocal_path]})
     assert ranked["context_files"] == 1 and "warning" in ranked
@@ -292,3 +297,41 @@ def test_other_clients_still_complete_during_a_multi_tick_command(live):
     worker.join()
     other.close()
     assert results["add"]["time"] == 48.0 and tempo["tempo"] == 130
+
+
+def test_continuous_parameters_by_display_value(live):
+    conn, song = live
+    eq = fake_live.FakeDevice("EQ Eight", [fake_live.FakeParam("1 Frequency A", 0.5, kind="freq"),
+                                           fake_live.FakeParam("Release", 0.5, kind="time"),
+                                           fake_live.FakeParam("1 Resonance A", 0.5, kind="plain")])
+    song.tracks[0].devices.append(eq)
+
+    def show(param, text):
+        return conn.send("set_device_parameter", track_index=0, device_index=0, parameter=param,
+                         display_value=text)["display"]
+
+    assert show("Frequency", "350 Hz") == "350 Hz"
+    assert show("Frequency", "2.5 kHz") == "2.50 kHz"
+    assert show("Frequency", "1200 Hz") == "1.20 kHz"  # crosses the Hz/kHz display switch
+    assert show("Release", "150 ms") == "150.0 ms"
+    assert show("Release", "1.5 s") == "1.50 s"
+    assert show("Resonance", "0.71") == "0.71"  # no unit
+    with pytest.raises(LiveError, match="not '-18 dB'"):
+        show("Frequency", "-18 dB")
+    with pytest.raises(LiveError, match="can't read"):
+        show("Frequency", "bright")
+
+
+def test_load_at_position_and_move_device(live, monkeypatch):
+    import Live
+    conn, song = live
+    track = song.tracks[0]
+    track.devices[:] = [fake_live.FakeDevice("Ozone 11")]
+    browser = Live.Application.get_application().browser
+    monkeypatch.setattr(browser, "load_item",
+                        lambda item: song.view.selected_track.devices.append(fake_live.FakeDevice(item.name)))
+    conn.send("search_browser", query="EQ Eight", category="audio_effects")
+    loaded = conn.send("load_browser_item", uri="query:EQ Eight", track_index=0, position=0)
+    assert loaded["devices"] == ["EQ Eight", "Ozone 11"]
+    moved = conn.send("move_device", track_index=0, device_index=0, position=1)
+    assert moved["devices"] == ["Ozone 11", "EQ Eight"]

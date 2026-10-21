@@ -435,6 +435,9 @@ def energy_over_time(mono: np.ndarray, sr: int, points: int = 32) -> list[dict]:
     return out
 
 
+BASS_HEAVY_PCT = 85  # share of energy below 250 Hz; see observations()
+
+
 def observations(result: dict) -> list[str]:
     """Plain-language flags a producer would notice. Heuristics, not rules."""
     notes = []
@@ -448,9 +451,12 @@ def observations(result: dict) -> list[str]:
     shares = {b["band"]: b["share_pct"] or 0 for b in spec.get("bands", [])}
     if shares:
         low = shares["sub"] + shares["bass"]
-        if low > 65:
-            notes.append(f"Low end (below 250 Hz) carries {low:.0f}% of the energy: very bass-heavy for a "
-                         "full mix (normal for a kick or bass stem).")
+        # Energy share always leans low (a kick or bass note carries far more energy than a hi-hat
+        # at the same loudness). Finished house mixes measured 70-75% below 250 Hz, so 65% misfired.
+        if low > BASS_HEAVY_PCT:
+            notes.append(f"Low end (below 250 Hz) carries {low:.0f}% of the energy, more than most "
+                         "full mixes (normal for a kick or bass stem). Confirm with compare_to_reference "
+                         "against a track in the same genre before cutting bass.")
         if shares["low_mid"] > 20:
             notes.append(f"Low mids (250-500 Hz) at {shares['low_mid']:.0f}%: muddy or boxy for a full mix "
                          "(normal for a vocal or single instrument).")

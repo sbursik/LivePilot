@@ -17,7 +17,21 @@ class FakeParam:
                 return "-inf dB"
             db = (v - 0.85) * 40.0 if v >= 0.85 else -70 * (1 - v / 0.85) ** 1.5
             return "%.1f dB" % db
+        if self._kind == "freq":  # log sweep like EQ Eight: 0 -> 20 Hz, 1 -> 20 kHz
+            hz = 20.0 * 1000.0 ** v
+            return "%.0f Hz" % hz if hz < 1000 else "%.2f kHz" % (hz / 1000)
+        if self._kind == "time":  # 0 -> 1 ms, 1 -> 10 s
+            ms = 10000.0 ** v
+            return "%.1f ms" % ms if ms < 1000 else "%.2f s" % (ms / 1000)
         return "%.2f" % v
+
+
+class FakeDevice:
+    class_name, type, is_active = "AudioEffectGroupDevice", 2, True
+
+    def __init__(self, name, parameters=()):
+        self.name = name
+        self.parameters = [FakeParam("Device On", 1.0)] + list(parameters)
 
 
 class FakeMixer:
@@ -165,6 +179,13 @@ class FakeSong:
             self.tracks.append(t)
         else:
             self.tracks.insert(index, t)
+
+    def move_device(self, device, target, position):
+        for t in self.tracks + self.return_tracks + [self.master_track]:
+            if device in t.devices:
+                t.devices.remove(device)
+        target.devices.insert(position, device)
+        return position
 
     def start_playing(self):
         self.is_playing = True
