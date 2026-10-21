@@ -256,6 +256,11 @@ def test_locators_land_where_asked_not_at_the_old_playhead(live):
     assert [(c["time"], c["name"]) for c in listing] == [(0.0, "Intro"), (32.0, "Drop"), (64.0, "Outro")]
     assert conn.send("get_session_info")["song_time"] == 8.0  # playhead restored
 
+    # Live keeps cues in its own order; every listing must use the same time-ordered indices.
+    song.cue_points.reverse()
+    assert conn.send("get_session_info")["locators"] == conn.send("get_locators")
+    assert conn.send("get_session_info")["locators"][0]["name"] == "Intro"
+
     # Adding where one exists renames it instead of toggling it away.
     assert conn.send("add_locator", time=32.0, name="Drop 1")["existing"] is True
 

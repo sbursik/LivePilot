@@ -227,7 +227,7 @@ class Handlers(object):
                 "devices": [d.name for d in song.master_track.devices],
             },
             "scenes": [{"index": i, "name": s.name} for i, s in enumerate(song.scenes)],
-            "locators": [{"index": i, "name": c.name, "time": c.time} for i, c in enumerate(song.cue_points)],
+            "locators": self._locator_list(),  # same time order and indices as manage_locator
         }
 
     def cmd_set_tempo(self, bpm):
