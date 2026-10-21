@@ -49,11 +49,31 @@ Then try asking:
 
 ## Tools
 
-55 MCP tools grouped into: session and transport, tracks and mixer, routing, clips, MIDI notes
+63 MCP tools grouped into: session and transport, tracks and mixer, routing, clips, MIDI notes
 (add/remove/quantize/humanize/transpose/velocity), generators (drums in 9 styles, basslines, diatonic
 chords), scenes, devices and parameters, sidechain, browser search and loading, and arrangement
-(locators, placing clips, arrangement clips). `raw_command` reaches any Remote Script command
+(locators, placing and editing arrangement clips), and the audio analyser below. `raw_command` reaches any Remote Script command
 directly (`list_commands` lists them).
+
+## Audio analyser
+
+The AI can't hear, so these tools measure audio and give it numbers to reason with:
+
+| Tool | What it does |
+|---|---|
+| `analyze_clip` | Analyses an audio clip in the set (Session or Arrangement), limited to its start/end markers when warped |
+| `analyze_audio_file` | Analyses any wav/aif/flac/mp3/ogg file: mixdowns, stems, references, samples |
+| `compare_to_reference` | Compares a mix with a reference: tonal balance after loudness matching, loudness, dynamics, width, low-end mono and key, with suggestions |
+| `analyze_frequency_space` | Shows which bands the set's audio fills, which are open, and which parts crowd each band |
+| `score_samples` | Ranks samples (files or a folder) by how well they fill open bands and fit the song key |
+
+Measurements: integrated, short-term and momentary loudness (LUFS, per ITU-R BS.1770-4),
+loudness range, true peak, crest factor, energy per band and octave, spectral centroid and
+brightness, stereo correlation, width and low-end mono, tempo, onset density, key with Camelot
+compatibility, and energy over time.
+
+The analyser reads audio files, so MIDI and instrument tracks (e.g. Serum) aren't measured until
+you bounce or export them. The frequency-space tools say which tracks they couldn't include.
 
 ## Development
 
@@ -81,6 +101,6 @@ Not yet verified on a Mac. First run there:
 ## Roadmap
 
 - [x] Bridge (Remote Script) and MCP server
-- [ ] Audio analyser: band energy, brightness, rhythmic density, key, LUFS, reference matching, sample-fit scoring
+- [x] Audio analyser: band energy, brightness, rhythmic density, key, LUFS, reference matching, sample-fit scoring
 - [ ] Mix and master helpers: gain staging to target levels, master chain, LUFS targeting
 - [ ] Standalone desktop app with built-in chat (user's own Anthropic API key) and installers for both OSes

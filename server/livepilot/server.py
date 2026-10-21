@@ -18,7 +18,11 @@ Working style:
   add ghost notes, adjust velocities) instead of leaving raw patterns.
 - Plugin parameters are only reachable if Live exposes them (get_device_parameters). For big
   synths like Serum, Live shows parameters only after the user adds them with Configure.
+- You can't hear audio. Before judging or changing a mix, measure it with the analyser tools
+  (analyze_clip, analyze_audio_file, compare_to_reference, analyze_frequency_space,
+  score_samples) and base decisions on those numbers.
 """
+import os
 from typing import Any, Literal
 
 from mcp.server.mcpserver import MCPServer
@@ -642,6 +646,190 @@ def delete_arrangement_clip(track_index: int, arrangement_clip_index: int) -> di
 def back_to_arrangement() -> dict:
     """Press 'Back to Arrangement' so the arrangement plays instead of session clips."""
     return _send("back_to_arrangement")
+
+
+# --------------------------------------------------------------- analyser
+# Imported lazily so the rest of the server still works if numpy/scipy are missing.
+
+def _analysis():
+    from . import analysis
+    return analysis
+
+
+def _song_tempo() -> float | None:
+    try:
+        return _send("get_session_info", include_clips=False)["tempo"]
+    except Exception:
+        return None
+
+
+def _song_key() -> tuple[int, str] | None:
+    try:
+        key = _send("get_session_info", include_clips=False).get("key") or {}
+    except Exception:
+        return None
+    mode = {"Major": "major", "Minor": "minor"}.get(key.get("scale", ""))
+    return (key["root_note"], mode) if mode and key.get("root_note") is not None else None
+
+
+def _beats_to_seconds(beat: float, markers: list[dict]) -> float:
+    """Map a clip beat position to a file position via warp markers, extrapolating past the ends."""
+    pts = sorted((m["beat_time"], m["sample_time"]) for m in markers)
+    if beat <= pts[0][0]:
+        seg = pts[:2]
+    elif beat >= pts[-1][0]:
+        seg = pts[-2:]
+    else:
+        seg = next((a, b) for a, b in zip(pts, pts[1:]) if a[0] <= beat <= b[0])
+    (b0, s0), (b1, s1) = seg
+    return s0 + (beat - b0) * (s1 - s0) / (b1 - b0) if b1 != b0 else s0
+
+
+@mcp.tool()
+def analyze_audio_file(path: str, start_sec: float | None = None, end_sec: float | None = None,
+                       tempo_bpm: float | None = None) -> dict:
+    """Measure an audio file (wav, aif, flac, mp3, ogg) so you can reason about how it sounds:
+    loudness (integrated LUFS, true peak, loudness range, crest), frequency balance by band and
+    octave, brightness, stereo width and low-end mono, tempo and rhythmic density, key, and
+    energy over time, plus plain-language observations. Optionally only a region (seconds).
+    tempo_bpm (e.g. the song tempo) is used for onsets-per-beat. Use this for exported mixdowns,
+    stems, reference tracks and samples. MIDI/synth tracks have no file: bounce them first."""
+    a = _analysis()
+    return a.public(a.analyze(path, start_sec, end_sec, tempo_bpm))
+
+
+@mcp.tool()
+def analyze_clip(track_index: int, slot_index: int | None = None,
+                 arrangement_clip_index: int | None = None) -> dict:
+    """Analyse an audio clip in the set (Session slot or Arrangement clip) from its source file.
+    For warped clips only the part between the clip's start and end markers is analysed;
+    unwarped clips are analysed whole. Uses the song tempo for rhythm figures. Clip gain,
+    effects and faders aren't applied: this measures the source audio."""
+    info = _send("get_clip_info", **_ref(track_index, slot_index, arrangement_clip_index))
+    if info.get("is_midi"):
+        return {"error": "MIDI clip: there is no audio to analyse. Bounce or freeze and flatten the track, "
+                         "or export it, then use analyze_audio_file."}
+    start = end = None
+    region = "whole file"
+    markers = info.get("warp_markers") or []
+    if info.get("warping") and len(markers) >= 2:
+        start = max(0.0, _beats_to_seconds(info["start_marker"], markers))
+        end = _beats_to_seconds(info["end_marker"], markers)
+        region = "between clip start and end markers"
+    a = _analysis()
+    result = a.public(a.analyze(info["file_path"], start, end, _song_tempo()))
+    result["clip"] = {"name": info["name"], "region": region}
+    return result
+
+
+@mcp.tool()
+def compare_to_reference(path: str, reference_path: str, start_sec: float | None = None,
+                         end_sec: float | None = None, reference_start_sec: float | None = None,
+                         reference_end_sec: float | None = None) -> dict:
+    """Compare a mix (or stem) with a reference track: tonal balance per octave after loudness
+    matching, loudness, dynamics, stereo width, low-end mono and key, with concrete suggestions.
+    Compare like with like, e.g. a drop against the reference's drop, using the region arguments."""
+    a = _analysis()
+    mix = a.analyze(path, start_sec, end_sec)
+    ref = a.analyze(reference_path, reference_start_sec, reference_end_sec)
+    return a.public(a.compare.compare_to_reference(mix, ref))
+
+
+def _context_files(context_paths: list[str] | None) -> list[tuple[str, str]]:
+    if context_paths:
+        return [(p, os.path.basename(p)) for p in context_paths]
+    seen, out = set(), []
+    for c in _send("get_audio_clip_files"):
+        if c["file_path"] and c["file_path"] not in seen:
+            seen.add(c["file_path"])
+            out.append((c["file_path"], f"{c['track']}: {c['name']}"))
+    return out
+
+
+def _unmeasured_tracks() -> list[str]:
+    """Unmuted MIDI tracks: they make sound in the set but have no audio file to measure."""
+    tracks = _send("get_session_info", include_clips=False)["tracks"]
+    return [t["name"] for t in tracks if t["type"] == "midi" and not t["mute"]]
+
+
+def _space(context_paths: list[str] | None) -> tuple[dict, list[str]]:
+    a = _analysis()
+    analysed, skipped = [], []
+    for path, label in _context_files(context_paths):
+        try:
+            r = dict(a.analyze(path, quick=True))
+        except Exception as e:
+            skipped.append(f"{label}: {e}")
+            continue
+        r["label"] = label
+        analysed.append(r)
+    space = a.compare.frequency_space(analysed)
+    if context_paths is None:
+        missing = _unmeasured_tracks()
+        if missing:
+            space["not_measured"] = missing
+            space["warning"] = (f"{len(missing)} MIDI/instrument track(s) aren't in this map ({', '.join(missing)}). "
+                                "Bands they fill (e.g. a synth bass) may show as open when they aren't. "
+                                "For an accurate map, export or bounce those tracks and pass the files "
+                                "as context_paths together with the other stems.")
+    return space, skipped
+
+
+@mcp.tool()
+def analyze_frequency_space(context_paths: list[str] | None = None) -> dict:
+    """Show which frequency bands the set's audio already fills, which are open, and which
+    parts crowd each band. By default uses every unmuted audio clip in the set; or pass files
+    (e.g. exported stems). Each file counts equally, so this shows occupancy, not final levels.
+    MIDI/synth tracks aren't included unless you pass their bounced audio."""
+    space, skipped = _space(context_paths)
+    result = _analysis().public(space)
+    if skipped:
+        result["skipped"] = skipped
+    return result
+
+
+@mcp.tool()
+def score_samples(candidate_paths: list[str] | None = None, folder: str | None = None,
+                  context_paths: list[str] | None = None, max_files: int = 100, top: int = 15) -> dict:
+    """Rank samples by how well they'd fit the current set: high scores put their energy in bands
+    the set leaves open (not clashing with existing parts) and are in a compatible key (Camelot
+    wheel against the song key). Pass candidate files and/or a folder to scan (recursive).
+    Context defaults to the set's unmuted audio clips; pass context_paths to use stems instead."""
+    a = _analysis()
+    candidates = list(candidate_paths or [])
+    if folder:
+        candidates += a.find_audio_files(folder, limit=max_files)
+    candidates = candidates[:max_files]
+    if not candidates:
+        return {"error": "pass candidate_paths or a folder containing audio files"}
+    space, skipped = _space(context_paths)
+    song_key = _song_key()
+    ranked = []
+    for path in candidates:
+        try:
+            # The first 30 s are plenty to characterise a sample or loop.
+            r = a.analyze(path, end=30.0 if a.features.sf.info(path).duration > 30 else None, quick=True)
+        except Exception as e:
+            skipped.append(f"{os.path.basename(path)}: {e}")
+            continue
+        if r.get("silent"):
+            continue
+        ranked.append(a.compare.score_sample(r, space, song_key))
+    ranked.sort(key=lambda s: -(s["score"] or 0))
+    result = {
+        "song_key": a.compare.key_name(*song_key) if song_key else None,
+        "context_files": space.get("files", 0),
+        "open_bands": space.get("open_bands", []),
+        "analysed": len(ranked),
+        **({"warning": space["warning"]} if "warning" in space else {}),
+        "ranked": ranked[:top],
+    }
+    if space.get("files", 0) == 0:
+        result["note"] = ("No audio context found (MIDI-only set?), so scores reflect key fit only. "
+                          "Pass bounced stems as context_paths for frequency-fit scoring.")
+    if skipped:
+        result["skipped"] = skipped
+    return result
 
 
 @mcp.tool()

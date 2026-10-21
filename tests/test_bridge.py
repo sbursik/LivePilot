@@ -196,3 +196,49 @@ def test_list_results_arrive_as_one_block(monkeypatch, tool, args):
     monkeypatch.setattr(server.live, "send", lambda cmd, **p: rows)
     result = asyncio.run(server.mcp.call_tool(tool, args))
     assert len(result.content) == 1
+
+
+def test_analyser_tools_end_to_end(live, monkeypatch, tmp_path):
+    """MCP tool -> socket -> fake Live for clip lookups -> analyser on real files."""
+    import asyncio
+    import json
+
+    import numpy as np
+    import soundfile as sf
+    from livepilot import server
+
+    conn, song = live
+    monkeypatch.setattr(server, "live", conn)
+    sr = 44100
+    t = np.arange(4 * sr) / sr
+    vocal_path, hats_path = str(tmp_path / "vocal.wav"), str(tmp_path / "hats.wav")
+    sf.write(vocal_path, 0.3 * np.sin(2 * np.pi * 330 * t), sr)
+    sf.write(hats_path, 0.05 * np.random.default_rng(0).standard_normal(len(t)) * (np.sin(2 * np.pi * 8 * t) > 0.9), sr)
+
+    class AudioClip(fake_live.FakeClip):
+        is_midi_clip, is_audio_clip = False, True
+        gain_display_string, pitch_coarse, pitch_fine, warping, warp_mode, warp_markers = "0.0 dB", 0, 0.0, False, 0, []
+
+    audio = fake_live.FakeTrack("Vox")
+    audio.has_midi_input, audio.has_audio_input = False, True
+    audio.clip_slots[0].clip = AudioClip(8)
+    audio.clip_slots[0].clip.name, audio.clip_slots[0].clip.file_path = "Lead", vocal_path
+    song.tracks.append(audio)  # track 1; track 0 is the fake MIDI track
+
+    def call(tool, args):
+        result = asyncio.run(server.mcp.call_tool(tool, args))
+        assert len(result.content) == 1
+        return json.loads(result.content[0].text)
+
+    clip = call("analyze_clip", {"track_index": 1, "slot_index": 0})
+    assert clip["clip"]["region"] == "whole file" and clip["spectrum"]["bands"]
+
+    space = call("analyze_frequency_space", {})
+    assert space["files"] == 1 and space["not_measured"] == ["1-MIDI"]
+
+    ranked = call("score_samples", {"candidate_paths": [hats_path, vocal_path]})
+    assert ranked["context_files"] == 1 and "warning" in ranked
+    assert ranked["ranked"][0]["file"] == hats_path  # fills space the vocal leaves open
+
+    song.tracks[0].clip_slots[0].create_clip(4)
+    assert "MIDI clip" in call("analyze_clip", {"track_index": 0, "slot_index": 0})["error"]

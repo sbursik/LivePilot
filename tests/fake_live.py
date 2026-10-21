@@ -84,6 +84,7 @@ class FakeSlot:
 class FakeTrack:
     has_midi_input = True
     has_audio_input = False
+    has_audio_output = True
     can_be_armed = True
     is_foldable = False
 

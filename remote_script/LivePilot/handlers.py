@@ -1010,6 +1010,25 @@ class Handlers(object):
             info["file_path"] = c.file_path
         return info
 
+    def cmd_get_audio_clip_files(self, include_muted=False):
+        """Every audio clip in the set (Session and Arrangement) with its source file, for the
+        analyser. Muted tracks and deactivated clips are skipped unless include_muted."""
+        out = []
+        for i, t in enumerate(self.song.tracks):
+            if getattr(t, "is_foldable", False) or not t.has_audio_output:
+                continue
+            if t.mute and not include_muted:
+                continue
+            for si, s in enumerate(t.clip_slots):
+                if s.has_clip and s.clip.is_audio_clip:
+                    out.append({"track_index": i, "track": t.name, "slot_index": si,
+                                "name": s.clip.name, "file_path": s.clip.file_path})
+            for n, c in enumerate(self._arrangement_clips(t)):
+                if c.is_audio_clip and (include_muted or not c.muted):
+                    out.append({"track_index": i, "track": t.name, "arrangement_clip_index": n,
+                                "name": c.name, "file_path": c.file_path, "start": c.start_time})
+        return out
+
     def cmd_get_arrangement_clips(self, track_index=None):
         """Every clip in the Arrangement (or on one track) as a flat list, ordered by track and
         then start time. arrangement_clip_index counts per track, so a clip is addressed by

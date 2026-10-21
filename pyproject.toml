@@ -3,10 +3,10 @@ name = "livepilot"
 version = "0.1.0"
 description = "Control Ableton Live in plain language through an MCP server and a Live Remote Script"
 requires-python = ">=3.10"
-dependencies = ["mcp>=2.0,<3"]
+dependencies = ["mcp>=2.0,<3", "numpy>=1.26", "scipy>=1.11", "soundfile>=0.12"]
 
 [project.optional-dependencies]
-dev = ["pytest"]
+dev = ["pytest", "pyloudnorm"]
 
 [project.scripts]
 livepilot = "livepilot.server:main"
