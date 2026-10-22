@@ -212,6 +212,8 @@ class FakeSong:
                 self._song_time, self._pending_time = self._pending_time, None
         elif self.is_playing:
             self._song_time += self.beats_per_tick
+            for param, envelope in self.automation:  # existing automation plays back
+                param._value = envelope(self._song_time)
 
     def set_or_delete_cue(self):
         at = [c for c in self.cue_points if c.time == self._song_time]
@@ -226,6 +228,7 @@ class FakeSong:
         self.is_playing = False
         self._song_time, self._pending_time, self._pending_ticks = 0.0, None, 0
         self.playhead_lag = 1  # ticks before a playhead move lands; Live sometimes takes more
+        self.automation = []  # (param, beat -> value): envelopes already in the Arrangement
         self.beats_per_tick = 0.0  # how far the playhead moves per update tick while playing
         self.record_mode = self.session_automation_record = False
         self.punch_in = self.punch_out = False

@@ -594,6 +594,24 @@ def test_record_automation_writes_a_sweep_and_restores_the_set(mcp_call):
     assert song.current_song_time == 40.0
 
 
+def test_record_automation_holds_a_value_against_old_automation(mcp_call):
+    call, song = mcp_call
+    song.beats_per_tick = 0.5
+    volume = fake_live.RecordingParam(song, "Track Volume", 0.85)
+    song.master_track.mixer_device.volume = volume
+    # An old fade from 0 dB at beat 10 down to the bottom at beat 14, then held there.
+    song.automation.append((volume, lambda beat: 0.85 * min(1.0, max(0.0, (14 - beat) / 4))))
+
+    r = call("record_automation", {"lanes": [{"kind": "master", "parameter": "volume", "points": [
+        {"beat": 8, "display": "0 dB"}, {"beat": 20, "display": "0 dB"}]}]})
+    assert r["state"] == "done"
+    # The held 0 dB is written over the old fade every time playback pulls it away, to the end.
+    held = volume.recorded[0][1]  # what "0 dB" came to at the first point
+    written = [b for b, v in volume.recorded if v == held]
+    assert max(b for b, _ in volume.recorded) >= 19.5
+    assert all(any(abs(w - b) <= 0.5 for w in written) for b in (11.0, 13.0, 15.0, 18.0))
+
+
 def test_record_automation_refuses_while_session_clips_play(live):
     conn, song = live
     song.tracks[0].playing_slot_index = 0

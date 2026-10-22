@@ -1328,7 +1328,9 @@ class Handlers(object):
         value = self._value_at(points, now)
         if param.is_quantized:
             value = float(round(value))
-        if value != lane["last"]:
+        # Also when the target holds still: automation already in the lane plays back and moves
+        # the parameter, and only values set here are recorded over it.
+        if value != lane["last"] or abs(param.value - value) > 1e-9:
             param.value = value
             lane["last"] = value
         if now >= points[-1][0]:
