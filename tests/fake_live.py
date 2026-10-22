@@ -19,6 +19,9 @@ class FakeParam:
             return "%.1f dB" % db
         if self._kind == "db":  # value is the dB figure itself
             return "%.1f dB" % v
+        if self._kind == "limiter_gain":  # like Live 12's Limiter: 0..1 is -24..24 dB, whole dB from 10
+            db = -24.0 + 48.0 * v
+            return "%.1f dB" % db if abs(db) < 10 else "%d dB" % round(db)
         if self._kind == "freq":  # log sweep like EQ Eight: 0 -> 20 Hz, 1 -> 20 kHz
             hz = 20.0 * 1000.0 ** v
             return "%.0f Hz" % hz if hz < 1000 else "%.2f kHz" % (hz / 1000)
@@ -62,7 +65,8 @@ def live_device(name, legacy=False):
     """Live's own devices as the master-chain tools see them. legacy: Live 11's Limiter, whose
     gain is "Gain" and which has no Mode."""
     if name == "Limiter":
-        params = [FakeParam("Gain" if legacy else "Input Gain", 0.0, -24.0, 24.0, kind="db"),
+        params = [FakeParam("Gain", 0.0, -24.0, 24.0, kind="db") if legacy
+                  else FakeParam("Input Gain", 0.5, kind="limiter_gain"),
                   FakeParam("Ceiling", 0.0, -24.0, 0.0, kind="db")]
         if not legacy:
             params.append(FakeMenuParam("Mode", ["Standard", "Soft Clip", "True Peak"]))

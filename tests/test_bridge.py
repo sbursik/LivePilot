@@ -429,6 +429,20 @@ def test_menu_entries_match_by_number_or_prefix(live):
         show("Ratio", "3")
 
 
+def test_linear_controls_are_set_and_read_exactly(live):
+    conn, song = live
+    song.master_track.devices.append(fake_live.live_device("Limiter"))
+    r = conn.send("set_device_parameter", track_index=0, device_index=0, parameter="Input Gain",
+                  display_value="12.3 dB", kind="master")
+    assert r["display"] == "12 dB" and r["display_number"] == pytest.approx(12.3, abs=0.001)
+    ceiling = conn.send("get_device_parameters", track_index=0, device_index=0, kind="master")["parameters"][2]
+    assert "display_number" in ceiling  # -24..0 dB in the fake is linear too
+
+    song.master_track.devices.append(fake_live.FakeDevice("EQ", [fake_live.FakeParam("Freq", 0.5, kind="freq")]))
+    freq = conn.send("get_device_parameters", track_index=0, device_index=1, kind="master")["parameters"][1]
+    assert "display_number" not in freq  # a log sweep isn't linear: it keeps the bisect
+
+
 @pytest.fixture()
 def mcp_call(live, monkeypatch):
     import asyncio
@@ -473,7 +487,13 @@ def test_master_chain_then_match_loudness(mcp_call, tmp_path):
     mix = _tone(str(tmp_path / "mix.wav"), 10 ** (-20 / 20))
     r = call("match_loudness", {"mix_path": mix})
     assert abs(r["measured_lufs"] + 23.0) < 0.2 and abs(r["change_db"] - 9.0) < 0.2
-    assert abs(limiter.parameters[1].value - 9.0) < 0.2 and "warning" in r
+    gain_db = lambda: -24.0 + 48.0 * limiter.parameters[1].value
+    assert abs(gain_db() - r["change_db"]) < 0.01 and "warning" in r
+
+    # Above 10 dB the Limiter shows whole dB; the next round must add to the exact gain, not "9 dB".
+    quieter = _tone(str(tmp_path / "quieter.wav"), 10 ** (-15.3 / 20))
+    r2 = call("match_loudness", {"mix_path": quieter})
+    assert abs(gain_db() - (r["change_db"] + r2["change_db"])) < 0.01
 
     on_target = _tone(str(tmp_path / "loud.wav"), 10 ** (-11 / 20))
     assert call("match_loudness", {"mix_path": on_target})["status"].startswith("on target")

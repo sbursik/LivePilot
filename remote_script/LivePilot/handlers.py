@@ -175,6 +175,12 @@ class Handlers(object):
             info["index"] = index
         if param.is_quantized:
             info["value_items"] = list(param.value_items)
+        else:
+            linear = Handlers._linear(param)
+            if linear is not None:  # exact, where the display may round (Limiter: "14 dB")
+                lo, hi, _ = linear
+                info["display_number"] = round(
+                    lo + (param.value - param.min) / (param.max - param.min) * (hi - lo), 3)
         return info
 
     @staticmethod
@@ -213,7 +219,13 @@ class Handlers(object):
         steps = self._steps(param)
         if steps is not None:
             return param.min + self._match_item(steps, text)
-        target = self._parse_display(text)
+        target, linear = self._parse_display(text), self._linear(param)
+        if target is not None and linear is not None and target[1] in ("", linear[2]):
+            lo, hi, _ = linear
+            if target[0] in (float("inf"), float("-inf")):
+                return param.max if (target[0] > 0) == (hi > lo) else param.min
+            fraction = min(1.0, max(0.0, (target[0] - lo) / (hi - lo)))
+            return param.min + fraction * (param.max - param.min)
         if target is None:
             raise CommandError("can't read %r as a value with a unit (e.g. '350 Hz', '-18 dB', '150 ms')"
                                % text)
@@ -250,6 +262,28 @@ class Handlers(object):
         if param.str_for_value(lo + 0.5) not in (param.str_for_value(lo), param.str_for_value(lo + 1)):
             return None
         return [param.str_for_value(lo + i) for i in range(int(hi - lo) + 1)]
+
+    @staticmethod
+    def _linear(param):
+        """(display at min, display at max, unit) when the display is a straight line in its
+        unit across the range, as for the Limiter's Input Gain (-24..24 dB, shown without
+        decimals above 10 dB); values can then be worked out exactly instead of read off a
+        rounded display. None otherwise (frequency, the volume fader, stepped controls)."""
+        span = param.max - param.min
+        if param.is_quantized or span <= 0:
+            return None
+        ends = [Handlers._parse_display(param.str_for_value(v)) for v in (param.min, param.max)]
+        if None in ends or ends[0][1] != ends[1][1] or ends[0][1] in ("", "pan"):
+            return None
+        (lo, unit), (hi, _) = ends
+        if lo == hi or float("inf") in (abs(lo), abs(hi)):
+            return None
+        for f in (0.1, 0.25, 0.5, 0.75, 0.9):
+            shown = Handlers._parse_display(param.str_for_value(param.min + f * span))
+            # Allow for rounding to whole units; a curve misses by far more.
+            if shown is None or shown[1] != unit or abs(shown[0] - (lo + f * (hi - lo))) > 0.01 * abs(hi - lo) + 0.06:
+                return None
+        return lo, hi, unit
 
     def _set_param_db(self, param, db):
         if self._parse_db(param.str_for_value(param.max)) is None:

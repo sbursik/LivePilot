@@ -1152,8 +1152,8 @@ def match_loudness(mix_path: str, target: LoudnessTarget | None = "streaming",
         gain = _limiter_param(limiter["index"], "input gain", "gain")  # Live 12 renamed Gain
         if gain is None:
             return {**result, "error": "the Limiter has no Gain parameter exposed"}
-        now = _db(gain["display"]) or 0.0
-        ok, msg = _try_set(limiter["index"], gain["name"], f"{now + delta:.1f} dB")
+        now = gain.get("display_number", _db(gain["display"]) or 0.0)  # display rounds above 10 dB
+        ok, msg = _try_set(limiter["index"], gain["name"], f"{now + delta:.2f} dB")
         result["limiter_gain"] = msg
         ok2, msg2 = _try_set(limiter["index"], "Ceiling", f"{ceiling} dB")
         result["limiter_ceiling"] = msg2
@@ -1167,8 +1167,8 @@ def match_loudness(mix_path: str, target: LoudnessTarget | None = "streaming",
             result["added"] = "Utility at the start of the master chain"
         params = _send("get_device_parameters", track_index=0, device_index=utility["index"], kind="master")
         gain = next((p for p in params["parameters"] if p["name"].lower() == "gain"), None)
-        now = _db(gain["display"]) if gain else 0.0
-        ok, msg = _try_set(utility["index"], "Gain", f"{(now or 0.0) + delta:.1f} dB")
+        now = (gain.get("display_number", _db(gain["display"])) if gain else 0.0) or 0.0
+        ok, msg = _try_set(utility["index"], "Gain", f"{now + delta:.2f} dB")
         result["utility_gain"] = msg
         plugins = [d["name"] for d in devices if "Plugin" in d["class_name"]]
         result["note"] = ("Gain goes in before the rest of the master chain"
