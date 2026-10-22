@@ -763,7 +763,9 @@ def _played_beats(info: dict) -> tuple[float, float, str]:
     """The span of clip content (in clip beats) that the clip plays.
 
     Trimming an Arrangement clip changes its length in the arrangement but not its end marker, so
-    for Arrangement clips the played span is start marker + arrangement length, not the end marker."""
+    for Arrangement clips the played span is start marker + arrangement length, not the end marker.
+    An unlooped clip plays from loop_start to loop_end (Live's API gives the clip's start and end
+    there); Live ignores a start marker past loop_start."""
     looping = info.get("looping")
     loop = (info["loop_start"], info["loop_end"])
     if info.get("start_time") is not None:  # Arrangement clip
@@ -773,11 +775,10 @@ def _played_beats(info: dict) -> tuple[float, float, str]:
                 return loop[0], loop[1], "loop region (repeats in the arrangement)"
             begin = info["start_marker"]
             return begin, min(loop[1], begin + length), "part of the loop played in the arrangement"
-        begin = info["start_marker"]
-        return begin, min(info["end_marker"], begin + length), "region played in the arrangement"
+        return loop[0], min(loop[1], loop[0] + length), "region played in the arrangement"
     if looping:
         return loop[0], loop[1], "loop region"
-    return info["start_marker"], info["end_marker"], "between start and end markers"
+    return loop[0], loop[1], "clip start to end"
 
 
 @mcp.tool()

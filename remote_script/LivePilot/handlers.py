@@ -693,9 +693,9 @@ class Handlers(object):
             raise CommandError("this Live version can't set warp markers from a script (needs Live 11+)")
         c.warping = True
         markers = sorted(c.warp_markers, key=lambda m: m.beat_time)
-        first = markers[0]
+        first_beat, first_sec = (markers[0].beat_time, markers[0].sample_time) if markers else (0.0, 0.0)
         seconds = c.sample_length / float(c.sample_rate)
-        end_beat = first.beat_time + (seconds - first.sample_time) * bpm / 60.0
+        end_beat = first_beat + (seconds - first_sec) * bpm / 60.0
         try:
             marker = Live.Clip.WarpMarker(beat_time=end_beat, sample_time=seconds)
         except Exception:

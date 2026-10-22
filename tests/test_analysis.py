@@ -257,6 +257,9 @@ def test_played_region_of_trimmed_arrangement_clip():
     assert _played_beats(looped)[:2] == (0.0, 16.0)                    # loop repeats: whole loop
     short = dict(looped, start_time=0.0, end_time=4.0, start_marker=2.0)
     assert _played_beats(short)[:2] == (2.0, 6.0)                       # shorter than one loop
-    session = {"start_marker": 4.0, "end_marker": 20.0, "looping": False, "loop_start": 0.0, "loop_end": 32.0}
+    # Unlooped, Live plays loop_start..loop_end (the clip's start and end) and ignores the markers.
+    session = {"start_marker": 0.0, "end_marker": 32.0, "looping": False, "loop_start": 4.0, "loop_end": 20.0}
     assert _played_beats(session)[:2] == (4.0, 20.0)
-    assert _played_beats(dict(session, looping=True))[:2] == (0.0, 32.0)
+    assert _played_beats(dict(session, looping=True, loop_start=0.0, loop_end=32.0))[:2] == (0.0, 32.0)
+    trimmed = dict(info, start_marker=0.0)  # unlooped arrangement clip: also from loop_start
+    assert _played_beats(trimmed)[:2] == (8.0, 200.0)
