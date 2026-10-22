@@ -213,7 +213,8 @@ class FakeSong:
         elif self.is_playing:
             self._song_time += self.beats_per_tick
             for param, envelope in self.automation:  # existing automation plays back
-                param._value = envelope(self._song_time)
+                if param not in self.overridden:
+                    param._value = envelope(self._song_time)
 
     def set_or_delete_cue(self):
         at = [c for c in self.cue_points if c.time == self._song_time]
@@ -229,6 +230,7 @@ class FakeSong:
         self._song_time, self._pending_time, self._pending_ticks = 0.0, None, 0
         self.playhead_lag = 1  # ticks before a playhead move lands; Live sometimes takes more
         self.automation = []  # (param, beat -> value): envelopes already in the Arrangement
+        self.overridden = set()  # params set while recording: their old automation stops playing
         self.beats_per_tick = 0.0  # how far the playhead moves per update tick while playing
         self.record_mode = self.session_automation_record = False
         self.punch_in = self.punch_out = False
@@ -351,10 +353,12 @@ class RecordingParam(FakeParam):
 
     @value.setter
     def value(self, v):
-        self._value = v
+        changed, self._value = v != getattr(self, "_value", None), v
         song = getattr(self, "_song", None)
         if song is not None and song.is_playing and song.record_mode and song.session_automation_record:
-            self.recorded.append((song.current_song_time, v))
+            song.overridden.add(self)
+            if changed:  # like Live, only changes are written
+                self.recorded.append((song.current_song_time, v))
 
     def begin_gesture(self):
         self.gestures.append("begin")

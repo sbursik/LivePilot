@@ -605,11 +605,12 @@ def test_record_automation_holds_a_value_against_old_automation(mcp_call):
     r = call("record_automation", {"lanes": [{"kind": "master", "parameter": "volume", "points": [
         {"beat": 8, "display": "0 dB"}, {"beat": 20, "display": "0 dB"}]}]})
     assert r["state"] == "done"
-    # The held 0 dB is written over the old fade every time playback pulls it away, to the end.
+    # Live writes only changes, so the held 0 dB keeps being written, within a hair, to the end.
     held = volume.recorded[0][1]  # what "0 dB" came to at the first point
-    written = [b for b, v in volume.recorded if v == held]
+    written = [b for b, v in volume.recorded if abs(v - held) < 1e-3]
     assert max(b for b, _ in volume.recorded) >= 19.5
-    assert all(any(abs(w - b) <= 0.5 for w in written) for b in (11.0, 13.0, 15.0, 18.0))
+    assert all(any(abs(w - b) <= 0.5 for w in written) for b in (9.0, 11.0, 13.0, 15.0, 18.0))
+    assert volume.recorded[-1][1] == held
 
 
 def test_record_automation_refuses_while_session_clips_play(live):

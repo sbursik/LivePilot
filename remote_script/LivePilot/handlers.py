@@ -1328,12 +1328,22 @@ class Handlers(object):
         value = self._value_at(points, now)
         if param.is_quantized:
             value = float(round(value))
-        # Also when the target holds still: automation already in the lane plays back and moves
-        # the parameter, and only values set here are recorded over it.
-        if value != lane["last"] or abs(param.value - value) > 1e-9:
+        final = now >= points[-1][0]
+        if value != lane["last"] or final:
             param.value = value
             lane["last"] = value
-        if now >= points[-1][0]:
+        elif not param.is_quantized:
+            # Live writes automation only while the value changes, so a held value would leave
+            # what is already in the lane there. Keep it moving by a step too small to hear.
+            step = 1e-4 * (param.max - param.min)
+            lane["nudge"] = -lane.get("nudge", -step)
+            nudged = value + lane["nudge"]
+            if not param.min <= nudged <= param.max:
+                nudged = value - lane["nudge"]
+            param.value = nudged
+        elif abs(param.value - value) > 1e-9:
+            param.value = value
+        if final:
             if hasattr(param, "end_gesture"):
                 param.end_gesture()
             lane["done"] = True
