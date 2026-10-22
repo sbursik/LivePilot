@@ -282,6 +282,16 @@ def test_locators_land_where_asked_not_at_the_old_playhead(live):
     assert len(song.cue_points) == 2
 
 
+def test_back_to_back_locators_restore_the_playhead_when_live_is_slow(live):
+    conn, song = live
+    song.playhead_lag = 3  # Live hasn't applied the restore by the time the next command reads it
+    for i, time in enumerate((32.0, 64.0, 96.0, 128.0)):
+        conn.send("add_locator", time=time, name="L%d" % i)
+    conn.send("delete_locator", index=0)
+    assert conn.send("get_session_info")["song_time"] == 0.0
+    assert conn.send("set_song_time", beats=48.0)["song_time"] == 48.0
+
+
 def test_other_clients_still_complete_during_a_multi_tick_command(live):
     """A command from a second client queues behind add_locator and still completes (no deadlock)."""
     conn, song = live
@@ -412,8 +422,9 @@ def test_menu_entries_match_by_number_or_prefix(live):
 
     assert show("Ratio", "2:1") == "2"
     assert show("Attack", "10 ms") == "10"
-    assert show("Attack", "0.30") == "0.3"
+    assert show("Attack", "0.30") == ".3"
     assert show("Release", "Auto") == "A"
+    assert show("Release", "0.6") == ".6"
     with pytest.raises(LiveError, match="not in"):
         show("Ratio", "3")
 
@@ -455,6 +466,7 @@ def test_master_chain_then_match_loudness(mcp_call, tmp_path):
     glue, limiter = song.master_track.devices
     assert [p.str_for_value(p.value) for p in glue.parameters[1:4]] == ["2", "10", "A"]
     assert limiter.parameters[2].str_for_value(limiter.parameters[2].value) == "-1.0 dB"
+    assert limiter.parameters[3].str_for_value(limiter.parameters[3].value) == "True Peak"
     assert call("build_master_chain", {})["added"] == []  # nothing added twice
 
     # A 997 Hz sine at -20 dBFS peak reads -23 LUFS (EBU test signal), 9 LU under streaming.
@@ -465,6 +477,15 @@ def test_master_chain_then_match_loudness(mcp_call, tmp_path):
 
     on_target = _tone(str(tmp_path / "loud.wav"), 10 ** (-11 / 20))
     assert call("match_loudness", {"mix_path": on_target})["status"].startswith("on target")
+
+
+def test_master_chain_works_with_live_11s_limiter(mcp_call, tmp_path):
+    call, song = mcp_call
+    song.master_track.devices[:] = [fake_live.live_device("Limiter", legacy=True)]
+    assert "failed" not in call("build_master_chain", {"glue": False})
+    r = call("match_loudness", {"mix_path": _tone(str(tmp_path / "mix.wav"), 10 ** (-20 / 20))})
+    assert "error" not in r and r["limiter_gain"].startswith("Gain = ")
+    assert song.master_track.devices[0].parameters[1].value == pytest.approx(9.0, abs=0.2)
 
 
 def test_match_loudness_uses_a_utility_before_a_plugin(mcp_call, tmp_path):

@@ -1006,6 +1006,13 @@ def _devices(kind: str = "master", track_index: int = 0) -> list[dict]:
     return _send("get_devices", track_index=track_index, kind=kind)
 
 
+def _limiter_param(device_index: int, *names: str) -> dict | None:
+    """The master Limiter's first parameter named one of `names` (any case), or None."""
+    params = _send("get_device_parameters", track_index=0, device_index=device_index, kind="master")
+    by_name = {p["name"].lower(): p for p in params["parameters"]}
+    return next((by_name[n] for n in names if n in by_name), None)
+
+
 @mcp.tool()
 def gain_stage(target_lufs: float = -18.0, track_offsets: dict[str, float] | None = None,
                apply: bool = False) -> dict:
@@ -1103,6 +1110,10 @@ def build_master_chain(target: LoudnessTarget = "streaming", glue: bool = True,
         if d["class_name"] == "Limiter":
             ok, msg = _try_set(d["index"], "Ceiling", f"{ceiling} dB")
             (done if ok else failed).append(f"Limiter: {msg}")
+            # Standard mode limits sample peaks, so true peaks can pass the ceiling (Live 12+ only).
+            if _limiter_param(d["index"], "mode"):
+                ok, msg = _try_set(d["index"], "Mode", "True Peak")
+                (done if ok else failed).append(f"Limiter: {msg}")
     result: dict = {"target": target, "target_lufs": lufs, "true_peak_ceiling": ceiling,
                     "added": added, "set": done, "chain": [d["name"] for d in _devices()],
                     "next": ("Glue's threshold depends on the mix level and Live doesn't report gain "
@@ -1138,12 +1149,11 @@ def match_loudness(mix_path: str, target: LoudnessTarget | None = "streaming",
     devices = _devices()
     limiter = next((d for d in devices if d["class_name"] == "Limiter"), None)
     if limiter:
-        params = _send("get_device_parameters", track_index=0, device_index=limiter["index"], kind="master")
-        gain = next((p for p in params["parameters"] if p["name"].lower() == "gain"), None)
+        gain = _limiter_param(limiter["index"], "input gain", "gain")  # Live 12 renamed Gain
         if gain is None:
             return {**result, "error": "the Limiter has no Gain parameter exposed"}
         now = _db(gain["display"]) or 0.0
-        ok, msg = _try_set(limiter["index"], "Gain", f"{now + delta:.1f} dB")
+        ok, msg = _try_set(limiter["index"], gain["name"], f"{now + delta:.1f} dB")
         result["limiter_gain"] = msg
         ok2, msg2 = _try_set(limiter["index"], "Ceiling", f"{ceiling} dB")
         result["limiter_ceiling"] = msg2

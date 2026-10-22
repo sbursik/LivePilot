@@ -209,7 +209,10 @@ class Handlers(object):
     def _value_for_display(self, param, text):
         """The raw value whose display reads `text`, found by bisecting the parameter's range.
         Assumes the display is monotonic, as it is for Live's frequency, gain, time and ratio
-        controls."""
+        controls. Stepped controls pick the matching entry instead."""
+        steps = self._steps(param)
+        if steps is not None:
+            return param.min + self._match_item(steps, text)
         target = self._parse_display(text)
         if target is None:
             raise CommandError("can't read %r as a value with a unit (e.g. '350 Hz', '-18 dB', '150 ms')"
@@ -235,6 +238,18 @@ class Handlers(object):
         near = [(abs(d[0] - goal), v) for v in (lo, hi)
                 for d in [self._parse_display(param.str_for_value(v))] if d is not None]
         return min(near)[1] if near else hi
+
+    @staticmethod
+    def _steps(param):
+        """Entries of a stepped control that Live reports as continuous with no value_items
+        (Glue Compressor's Ratio, Attack and Release take 0, 1, 2...): an integer range where a
+        half step shows a neighbour's display. None for continuous controls."""
+        lo, hi = param.min, param.max
+        if param.is_quantized or lo != int(lo) or hi != int(hi) or not 0 < hi - lo <= 64:
+            return None
+        if param.str_for_value(lo + 0.5) not in (param.str_for_value(lo), param.str_for_value(lo + 1)):
+            return None
+        return [param.str_for_value(lo + i) for i in range(int(hi - lo) + 1)]
 
     def _set_param_db(self, param, db):
         if self._parse_db(param.str_for_value(param.max)) is None:
@@ -372,7 +387,11 @@ class Handlers(object):
         return {"stopped": True}
 
     def cmd_set_song_time(self, beats):
-        self.song.current_song_time = max(0.0, float(beats))
+        beats = max(0.0, float(beats))
+        if self.song.is_playing:
+            self.song.current_song_time = beats
+        else:  # wait until Live applies it, so the reply reports the new position
+            yield from self._move_playhead(beats)
         return {"song_time": self.song.current_song_time}
 
     def cmd_set_metronome(self, enabled):
@@ -1329,7 +1348,7 @@ class Handlers(object):
         self.song.set_or_delete_cue()
         yield
         cue = self._cue_at(time)
-        self.song.current_song_time = original
+        yield from self._move_playhead(original)
         if cue is None:
             raise CommandError("Live did not create a locator at %s" % time)
         if name:
@@ -1346,7 +1365,7 @@ class Handlers(object):
         yield from self._move_playhead(time)
         self.song.set_or_delete_cue()
         yield
-        self.song.current_song_time = original
+        yield from self._move_playhead(original)
         if self._cue_at(time) is not None:
             raise CommandError("Live did not remove the locator at %s" % time)
         return {"deleted": name, "time": time, "locators": self._locator_list()}

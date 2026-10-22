@@ -38,6 +38,17 @@ class FakeDevice:
             self.class_name = class_name
 
 
+class FakeStepParam(FakeParam):
+    """A stepped control Live reports as continuous, with no value_items: Glue Compressor's
+    Ratio, Attack and Release take raw values 0, 1, 2... and display these entries."""
+    def __init__(self, name, items, index=0):
+        super().__init__(name, float(index), 0.0, float(len(items) - 1))
+        self._items = list(items)
+
+    def str_for_value(self, v):
+        return self._items[int(round(v))]
+
+
 class FakeMenuParam(FakeParam):
     def __init__(self, name, items, index=0):
         super().__init__(name, float(index), 0.0, float(len(items) - 1))
@@ -47,16 +58,20 @@ class FakeMenuParam(FakeParam):
         return self.value_items[int(round(v))]
 
 
-def live_device(name):
-    """Live's own devices as the master-chain tools see them."""
+def live_device(name, legacy=False):
+    """Live's own devices as the master-chain tools see them. legacy: Live 11's Limiter, whose
+    gain is "Gain" and which has no Mode."""
     if name == "Limiter":
-        return FakeDevice("Limiter", [FakeParam("Gain", 0.0, -24.0, 24.0, kind="db"),
-                                      FakeParam("Ceiling", 0.0, -24.0, 0.0, kind="db")], "Limiter")
+        params = [FakeParam("Gain" if legacy else "Input Gain", 0.0, -24.0, 24.0, kind="db"),
+                  FakeParam("Ceiling", 0.0, -24.0, 0.0, kind="db")]
+        if not legacy:
+            params.append(FakeMenuParam("Mode", ["Standard", "Soft Clip", "True Peak"]))
+        return FakeDevice("Limiter", params, "Limiter")
     if name == "Glue Compressor":
         return FakeDevice("Glue Compressor", [
-            FakeMenuParam("Ratio", ["2", "4", "10"], 1),
-            FakeMenuParam("Attack", ["0.01", "0.1", "0.3", "1", "3", "10", "30"]),
-            FakeMenuParam("Release", ["0.1", "0.2", "0.4", "0.6", "0.8", "1.2", "A"]),
+            FakeStepParam("Ratio", ["2", "4", "10"], 1),
+            FakeStepParam("Attack", [".01", ".1", ".3", "1", "3", "10", "30"]),
+            FakeStepParam("Release", [".1", ".2", ".4", ".6", ".8", "1.2", "A"]),
             FakeParam("Threshold", 0.0, -40.0, 0.0, kind="db")], "GlueCompressor")
     if name == "Utility":
         return FakeDevice("Utility", [FakeParam("Gain", 0.0, -35.0, 35.0, kind="db")], "StereoGain")
@@ -178,11 +193,13 @@ class FakeSong:
 
     @current_song_time.setter
     def current_song_time(self, value):
-        self._pending_time = value
+        self._pending_time, self._pending_ticks = value, self.playhead_lag
 
     def tick(self):
         if self._pending_time is not None:
-            self._song_time, self._pending_time = self._pending_time, None
+            self._pending_ticks -= 1
+            if self._pending_ticks <= 0:
+                self._song_time, self._pending_time = self._pending_time, None
         elif self.is_playing:
             self._song_time += self.beats_per_tick
 
@@ -197,7 +214,8 @@ class FakeSong:
         self.tempo = 120.0
         self.signature_numerator = self.signature_denominator = 4
         self.is_playing = False
-        self._song_time, self._pending_time = 0.0, None
+        self._song_time, self._pending_time, self._pending_ticks = 0.0, None, 0
+        self.playhead_lag = 1  # ticks before a playhead move lands; Live sometimes takes more
         self.beats_per_tick = 0.0  # how far the playhead moves per update tick while playing
         self.record_mode = self.session_automation_record = False
         self.punch_in = self.punch_out = False
