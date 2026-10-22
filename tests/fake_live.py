@@ -166,6 +166,12 @@ class FakeTrack:
     def delete_clip(self, clip):
         self.arrangement_clips.remove(clip)
 
+    def duplicate_clip_to_arrangement(self, clip, time):
+        length = clip.end_time - clip.start_time if clip.is_arrangement_clip else clip.length
+        copy = FakeClip(length, start_time=time)
+        copy.name, copy.notes = clip.name, list(clip.notes)
+        self.arrangement_clips.append(copy)
+
 
 class FakeGroupTrack(FakeTrack):
     is_foldable = True

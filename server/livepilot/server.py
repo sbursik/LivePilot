@@ -666,14 +666,22 @@ def manage_locator(action: Literal["list", "add", "rename", "delete", "jump"], t
 
 
 @mcp.tool()
-def place_clip_in_arrangement(track_index: int, slot_index: int, time: float, repeats: int = 1) -> dict:
-    """Copy a session clip into the arrangement at `time` (beats), back to back `repeats` times.
-    Use this to build sections: e.g. bars 1-16 intro = time 0 to 64."""
-    info = _send("get_clip_info", track_index=track_index, slot_index=slot_index)
-    length = info["loop_end"] - info["loop_start"] if info["looping"] else info["length"]
+def place_clip_in_arrangement(track_index: int, time: float, slot_index: int | None = None,
+                              arrangement_clip_index: int | None = None, repeats: int = 1) -> dict:
+    """Copy a clip into the arrangement at `time` (beats), back to back `repeats` times. The
+    source is a Session clip (slot_index) or an Arrangement clip on the same track
+    (arrangement_clip_index), e.g. to repeat a section or extend a bounced track. Use this to
+    build sections: e.g. bars 1-16 intro = time 0 to 64."""
+    ref = _ref(track_index, slot_index, arrangement_clip_index)
+    info = _send("get_clip_info", **ref)
+    if arrangement_clip_index is not None:
+        length = info["end_time"] - info["start_time"]
+    else:
+        length = info["loop_end"] - info["loop_start"] if info["looping"] else info["length"]
     for i in range(repeats):
-        _send("duplicate_clip_to_arrangement", track_index=track_index, slot_index=slot_index,
-              time=time + i * length)
+        _send("duplicate_clip_to_arrangement", time=time + i * length, **ref)
+        if arrangement_clip_index is not None and time + i * length < info["start_time"]:
+            ref["arrangement_clip_index"] += 1  # the copy landed before the source
     return {"placed": repeats, "start": time, "end": time + repeats * length}
 
 

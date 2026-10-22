@@ -1418,9 +1418,10 @@ class Handlers(object):
         cues[index].jump()
         return {"song_time": cues[index].time}
 
-    def cmd_duplicate_clip_to_arrangement(self, track_index, slot_index, time):
+    def cmd_duplicate_clip_to_arrangement(self, track_index, time, slot_index=None, arrangement_clip_index=None):
+        """Copy a Session clip, or an Arrangement clip on the same track, to `time` (beats)."""
         t = self._track(track_index)
-        clip = self._clip(track_index, slot_index)
+        clip = self._clip(track_index, slot_index, arrangement_clip_index)
         if not hasattr(t, "duplicate_clip_to_arrangement"):
             raise CommandError("this Live version cannot place clips in the arrangement from the API")
         t.duplicate_clip_to_arrangement(clip, float(time))

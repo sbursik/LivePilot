@@ -499,6 +499,22 @@ def test_master_chain_then_match_loudness(mcp_call, tmp_path):
     assert call("match_loudness", {"mix_path": on_target})["status"].startswith("on target")
 
 
+def test_arrangement_clips_can_be_copied_along_the_track(mcp_call):
+    call, song = mcp_call
+    track = song.tracks[0]
+    track.clip_slots[0].create_clip(32)
+    track.clip_slots[0].clip.name = "Drop"
+    assert call("place_clip_in_arrangement", {"track_index": 0, "slot_index": 0, "time": 64})["end"] == 96
+    # A bounced track has no Session clips: extend it from its own Arrangement clips.
+    r = call("place_clip_in_arrangement", {"track_index": 0, "arrangement_clip_index": 0, "time": 160, "repeats": 2})
+    assert (r["start"], r["end"]) == (160, 224)
+    # Copies that land before the source still copy the source, not the clip that moved.
+    call("place_clip_in_arrangement", {"track_index": 0, "arrangement_clip_index": 2, "time": 0, "repeats": 2})
+    starts = sorted(c.start_time for c in track.arrangement_clips)
+    assert starts == [0, 32, 64, 160, 192]
+    assert {c.name for c in track.arrangement_clips} == {"Drop"}
+
+
 def test_master_chain_works_with_live_11s_limiter(mcp_call, tmp_path):
     call, song = mcp_call
     song.master_track.devices[:] = [fake_live.live_device("Limiter", legacy=True)]
