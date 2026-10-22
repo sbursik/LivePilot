@@ -29,6 +29,9 @@ Working style:
 - You can't hear audio. Before judging or changing a mix, measure it with the analyser tools
   (analyze_clip, analyze_audio_file, compare_to_reference, analyze_frequency_space,
   score_samples) and base decisions on those numbers.
+- Automation (filter sweeps, builds, fades, send throws) is written with record_automation,
+  which records it in real time. Put every parameter that moves over the same span in one
+  call: one pass records them all.
 - Mixing and mastering order: gain_stage for a starting balance (report first, apply once the
   user agrees), then mix moves, then build_master_chain, then the user exports the whole song
   and match_loudness sets the final level. Repeat export + match_loudness until on target.
@@ -36,6 +39,7 @@ Working style:
 import math
 import os
 import re
+import time
 from typing import Any, Literal
 
 from mcp.server.mcpserver import MCPServer
@@ -684,6 +688,41 @@ def delete_arrangement_clip(track_index: int, arrangement_clip_index: int) -> di
     """Delete an arrangement clip by its arrangement_clip_index (see get_arrangement_clips)."""
     return _send("delete_arrangement_clip", track_index=track_index,
                  arrangement_clip_index=arrangement_clip_index)
+
+
+@mcp.tool()
+def record_automation(lanes: list[dict], pre_roll_beats: float | None = None) -> dict:
+    """Write Arrangement automation by recording it: Live plays the span with automation
+    recording on while each parameter follows its points, moving in straight lines between
+    them. Live's API can't draw breakpoints directly, so this takes as long as the music does
+    (16 bars at 124 BPM is about 31 s) and its timing is about 0.1 s, so it suits sweeps,
+    builds, fades and rides, not fast gating.
+
+    lanes: one entry per parameter, all recorded in one pass:
+      {"track_index": 2, "device_index": 1, "parameter": "Frequency",
+       "points": [{"beat": 64, "display": "200 Hz"}, {"beat": 128, "display": "8 kHz"}]}
+    Omit device_index for the mixer: parameter "volume", "pan" or "send A". kind is "track"
+    (default), "return" or "master". Each point has beat and either display (with units) or a
+    raw value. Before a lane's first point the parameter is untouched.
+
+    Playback must be stopped, with no Session clips playing. Armed tracks are disarmed for the
+    pass and re-armed after. The playhead starts one bar before the first point (pre_roll_beats
+    changes that) and returns to where it was. Undo removes the recording."""
+    started = _send("record_automation", lanes=lanes, pre_roll_beats=pre_roll_beats)
+    deadline = time.monotonic() + started["seconds"] * 2 + 30
+    status = started
+    while time.monotonic() < deadline:
+        time.sleep(0.5)
+        status = _send("job_status", job=started["job"])
+        if status["state"] in ("done", "error", "cancelled"):
+            break
+    else:
+        status = _send("cancel_job", job=started["job"])
+        status["error"] = "recording didn't finish in time and was cancelled"
+    if status["state"] == "done":
+        status["next"] = ("Check the lanes in Live (show automation with A in the Arrangement). The "
+                          "recorded line has small steps at the 0.1 s update rate.")
+    return status
 
 
 @mcp.tool()

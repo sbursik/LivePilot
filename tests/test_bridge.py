@@ -499,3 +499,46 @@ def test_gain_stage_sets_faders_to_the_target(mcp_call, tmp_path):
     assert r["applied"] is False and song.tracks[1].mixer_device.volume.value == 0.85
     r = call("gain_stage", {"target_lufs": -30.0, "apply": True})
     assert r["tracks"][0]["fader_set"] == "-4.0 dB"
+
+
+def test_record_automation_writes_a_sweep_and_restores_the_set(mcp_call):
+    call, song = mcp_call
+    song.beats_per_tick = 0.5
+    track = song.tracks[0]
+    track.arm = True
+    song.loop = True
+    song.current_song_time = 40.0
+    song.tick()
+    cutoff = fake_live.RecordingParam(song, "Frequency", 0.0, kind="freq")
+    track.devices.append(fake_live.FakeDevice("Auto Filter", [cutoff]))
+    volume = fake_live.RecordingParam(song, "Track Volume", 0.85)
+    track.mixer_device.volume = volume
+
+    r = call("record_automation", {"lanes": [
+        {"track_index": 0, "device_index": 0, "parameter": "Frequency",
+         "points": [{"beat": 8, "display": "200 Hz"}, {"beat": 16, "display": "2.00 kHz"}]},
+        {"track_index": 0, "parameter": "volume", "points": [{"beat": 12, "display": "0 dB"},
+                                                             {"beat": 16, "display": "-12 dB"}]}]})
+    assert r["state"] == "done" and r["start_beat"] == 4.0
+
+    beats = [b for b, _ in cutoff.recorded]
+    assert beats[0] == 8.0 and beats[-1] == 16.0
+    shown = [cutoff.str_for_value(v) for _, v in cutoff.recorded]
+    assert shown[0] == "200 Hz" and shown[-1] == "2.00 kHz"
+    mid = dict(cutoff.recorded)[12.0]  # halfway along the line in raw value
+    assert mid == pytest.approx((cutoff.recorded[0][1] + cutoff.recorded[-1][1]) / 2)
+    assert cutoff.gestures == ["begin", "end"]
+    assert volume.recorded[0][0] == 12.0 and volume.str_for_value(volume.recorded[-1][1]) == "-12.0 dB"
+
+    # The set is as it was: stopped, not recording, re-armed, looping, playhead back.
+    assert not song.is_playing and not song.record_mode and not song.session_automation_record
+    assert track.arm and song.loop
+    song.tick()
+    assert song.current_song_time == 40.0
+
+
+def test_record_automation_refuses_while_session_clips_play(live):
+    conn, song = live
+    song.tracks[0].playing_slot_index = 0
+    with pytest.raises(LiveError, match="Session clips are playing"):
+        conn.send("record_automation", lanes=[{"parameter": "volume", "points": [{"beat": 0, "value": 0.5}]}])

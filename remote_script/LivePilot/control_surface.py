@@ -107,6 +107,7 @@ class LivePilot(ControlSurface):
 
     def update_display(self):
         ControlSurface.update_display(self)
+        self._handlers.tick_jobs()
         # A multi-tick command (see _dispatch) owns the main thread until it finishes, so
         # commands can't interleave with it, e.g. two locator commands moving the playhead.
         if self._pending is not None:

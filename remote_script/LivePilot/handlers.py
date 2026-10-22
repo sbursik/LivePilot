@@ -30,6 +30,8 @@ class Handlers(object):
     def __init__(self, surface):
         self._surface = surface
         self._browser_cache = {}
+        self._jobs = {}  # id -> {"gen": generator, "status": dict}; see tick_jobs
+        self._job_ids = 0
 
     @property
     def song(self):
@@ -44,6 +46,44 @@ class Handlers(object):
         if fn is None:
             raise CommandError("unknown command: %s" % cmd)
         return fn(**params)
+
+    def tick_jobs(self):
+        """Advance background jobs one step. Called every update tick, before queued commands.
+        Unlike multi-tick commands, a job doesn't hold up other commands, and its client polls
+        for the result instead of waiting on one long reply."""
+        for job in list(self._jobs.values()):
+            status = job["status"]
+            if status["state"] in ("done", "error", "cancelled"):
+                continue
+            try:
+                next(job["gen"])
+            except StopIteration:
+                status["state"] = "done"
+            except Exception as e:
+                job["gen"].close()
+                status.update(state="error", error=str(e))
+                self._surface.log_message("LivePilot: job %s failed: %s" % (status["job"], e))
+
+    def _start_job(self, gen, status):
+        self._job_ids += 1
+        status.update(job=self._job_ids, state="starting")
+        self._jobs = {k: v for k, v in self._jobs.items()
+                      if v["status"]["state"] not in ("done", "error", "cancelled")}
+        self._jobs[self._job_ids] = {"gen": gen, "status": status}
+        return status
+
+    def cmd_job_status(self, job):
+        if job not in self._jobs:
+            raise CommandError("no job %r" % job)
+        return self._jobs[job]["status"]
+
+    def cmd_cancel_job(self, job):
+        if job not in self._jobs:
+            raise CommandError("no job %r" % job)
+        entry = self._jobs[job]
+        entry["gen"].close()  # runs the job's cleanup
+        entry["status"]["state"] = "cancelled"
+        return entry["status"]
 
     def cmd_list_commands(self):
         return sorted(n[4:] for n in dir(self) if n.startswith("cmd_"))
@@ -162,8 +202,14 @@ class Handlers(object):
 
     def _set_param_display(self, param, text):
         """Set a continuous parameter to the value whose display reads `text` ('350 Hz', '-18 dB',
-        '150 ms', '25L'), by bisecting its range. Assumes the display is monotonic, as it is for
-        Live's frequency, gain, time and ratio controls."""
+        '150 ms', '25L')."""
+        param.value = self._value_for_display(param, text)
+        return param.str_for_value(param.value)
+
+    def _value_for_display(self, param, text):
+        """The raw value whose display reads `text`, found by bisecting the parameter's range.
+        Assumes the display is monotonic, as it is for Live's frequency, gain, time and ratio
+        controls."""
         target = self._parse_display(text)
         if target is None:
             raise CommandError("can't read %r as a value with a unit (e.g. '350 Hz', '-18 dB', '150 ms')"
@@ -176,8 +222,7 @@ class Handlers(object):
             raise CommandError("%s is shown in %r, not %r" % (param.name, param.str_for_value(param.max), text))
         goal, rising = target[0], hi_d[0] >= lo_d[0]
         if goal in (float("inf"), float("-inf")):
-            param.value = param.max if (goal > 0) == rising else param.min
-            return param.str_for_value(param.value)
+            return param.max if (goal > 0) == rising else param.min
         lo, hi = param.min, param.max
         for _ in range(40):
             mid = (lo + hi) / 2.0
@@ -189,8 +234,7 @@ class Handlers(object):
                 hi = mid
         near = [(abs(d[0] - goal), v) for v in (lo, hi)
                 for d in [self._parse_display(param.str_for_value(v))] if d is not None]
-        param.value = min(near)[1] if near else hi
-        return param.str_for_value(param.value)
+        return min(near)[1] if near else hi
 
     def _set_param_db(self, param, db):
         if self._parse_db(param.str_for_value(param.max)) is None:
@@ -1085,6 +1129,159 @@ class Handlers(object):
                              target_kind or kind)
         self._move_device(device, target, position)
         return {"track": target.name, "devices": [d.name for d in target.devices]}
+
+    # ============================================================ automation
+
+    # Live's API can't write breakpoints into a track's Arrangement automation lanes, so this
+    # records them: it turns on automation and Arrangement recording, plays the span, and moves
+    # each parameter along its points on every update tick (~10 Hz), like a hand on a controller.
+    # Armed tracks are disarmed for the pass so no audio or MIDI is recorded.
+
+    def _mixer_param(self, track, name):
+        m = track.mixer_device
+        n = str(name).strip().lower()
+        if n in ("volume", "vol"):
+            return m.volume
+        if n in ("pan", "panning"):
+            return m.panning
+        if n.startswith("send") and len(n[4:].strip()) == 1 and n[4:].strip().isalpha():
+            i = ord(n[4:].strip()) - ord("a")
+            if i < len(m.sends):
+                return m.sends[i]
+        raise CommandError("mixer parameter must be 'volume', 'pan' or 'send A'..'send %s'"
+                           % chr(ord("A") + max(0, len(m.sends) - 1)))
+
+    def _lane(self, spec):
+        kind = spec.get("kind", "track")
+        track = self._track(spec.get("track_index", 0), kind)
+        if spec.get("device_index") is None:
+            param = self._mixer_param(track, spec.get("parameter", "volume"))
+        else:
+            param = self._find_param(self._device(spec.get("track_index", 0), spec["device_index"], kind),
+                                     spec["parameter"])
+        points = []
+        for pt in spec.get("points") or []:
+            if "display" in pt:
+                text = str(pt["display"])
+                value = (param.min + self._match_item(list(param.value_items), text) if param.is_quantized
+                         else self._value_for_display(param, text))
+            else:
+                value = max(param.min, min(param.max, float(pt["value"])))
+            points.append((float(pt["beat"]), value))
+        if not points:
+            raise CommandError("each lane needs points: [{beat, value or display}, ...]")
+        points.sort()
+        return {"track": track.name, "param": param, "points": points, "touched": False,
+                "done": False, "last": None}
+
+    @staticmethod
+    def _value_at(points, beat):
+        if beat <= points[0][0]:
+            return points[0][1]
+        for (b0, v0), (b1, v1) in zip(points, points[1:]):
+            if beat <= b1:
+                return v0 if b1 == b0 else v0 + (v1 - v0) * (beat - b0) / (b1 - b0)
+        return points[-1][1]
+
+    def cmd_record_automation(self, lanes, pre_roll_beats=None):
+        """Record Arrangement automation for one or more parameters in a single playback pass.
+        lanes: [{track_index, kind, device_index (omit for the mixer), parameter, points:
+        [{beat, value or display}]}]; values move in straight lines between points. Runs as a
+        job: poll job_status until its state is done."""
+        song = self.song
+        if song.is_playing:
+            raise CommandError("stop playback first")
+        if any(r["state"] in ("starting", "recording") for r in (j["status"] for j in self._jobs.values())):
+            raise CommandError("an automation recording is already running")
+        playing = [t.name for t in song.tracks if getattr(t, "playing_slot_index", -1) >= 0]
+        if playing:
+            raise CommandError("Session clips are playing on %s; stop them and press Back to Arrangement "
+                               "first, or they'd be recorded into the Arrangement" % ", ".join(playing))
+        parsed = [self._lane(spec) for spec in lanes]
+        first = min(l["points"][0][0] for l in parsed)
+        end = max(l["points"][-1][0] for l in parsed)
+        bar = 4.0 * song.signature_numerator / song.signature_denominator
+        pre = bar if pre_roll_beats is None else max(0.0, float(pre_roll_beats))
+        start = max(0.0, first - pre)
+        status = {"start_beat": start, "end_beat": end, "position": start,
+                  "lanes": [{"track": l["track"], "parameter": l["param"].name,
+                             "points": len(l["points"])} for l in parsed],
+                  "seconds": round((end - start) * 60.0 / song.tempo, 1)}
+        self._start_job(self._record_pass(parsed, start, end, status), status)
+        return status
+
+    def _record_pass(self, lanes, start, end, status):
+        song = self.song
+        armed = [t for t in song.tracks if getattr(t, "can_be_armed", False) and t.arm]
+        saved = {"time": song.current_song_time, "loop": song.loop,
+                 "automation": song.session_automation_record,
+                 "punch_in": getattr(song, "punch_in", False), "punch_out": getattr(song, "punch_out", False)}
+        # Ticks the pass may take before it's treated as stuck: twice its length at 10 Hz, plus slack.
+        budget = int((end - start) * 60.0 / song.tempo * 20) + 200
+        try:
+            for t in armed:
+                t.arm = False
+            song.loop = False
+            for attr in ("punch_in", "punch_out"):
+                if hasattr(song, attr):
+                    setattr(song, attr, False)
+            for _ in self._move_playhead(start):
+                yield
+            song.session_automation_record = True
+            song.record_mode = True
+            if not song.is_playing:
+                song.continue_playing()
+            for _ in range(20):  # Live may start the transport on a later tick
+                if song.is_playing:
+                    break
+                yield
+            status["state"] = "recording"
+            for _ in range(budget):
+                yield
+                if not song.is_playing:
+                    raise CommandError("playback stopped at beat %.2f, before the end" % song.current_song_time)
+                now = song.current_song_time
+                status["position"] = round(now, 2)
+                for lane in lanes:
+                    self._drive(lane, now)
+                if now >= end:
+                    break
+            else:
+                raise CommandError("the pass didn't reach beat %s in time" % end)
+            yield  # one more tick so the final values are written
+        finally:
+            for lane in lanes:
+                if lane["touched"] and not lane["done"] and hasattr(lane["param"], "end_gesture"):
+                    lane["param"].end_gesture()
+            song.record_mode = False
+            song.stop_playing()
+            song.session_automation_record = saved["automation"]
+            song.loop = saved["loop"]
+            for attr in ("punch_in", "punch_out"):
+                if hasattr(song, attr):
+                    setattr(song, attr, saved[attr])
+            for t in armed:
+                t.arm = True
+            song.current_song_time = saved["time"]
+
+    def _drive(self, lane, now):
+        points, param = lane["points"], lane["param"]
+        if lane["done"] or now < points[0][0]:
+            return
+        if not lane["touched"]:
+            if hasattr(param, "begin_gesture"):
+                param.begin_gesture()
+            lane["touched"] = True
+        value = self._value_at(points, now)
+        if param.is_quantized:
+            value = float(round(value))
+        if value != lane["last"]:
+            param.value = value
+            lane["last"] = value
+        if now >= points[-1][0]:
+            if hasattr(param, "end_gesture"):
+                param.end_gesture()
+            lane["done"] = True
 
     # =========================================================== arrangement
 

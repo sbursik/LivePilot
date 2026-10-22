@@ -129,6 +129,7 @@ class FakeSlot:
 
 
 class FakeTrack:
+    playing_slot_index = -1
     has_midi_input = True
     has_audio_input = False
     has_audio_output = True
@@ -182,6 +183,8 @@ class FakeSong:
     def tick(self):
         if self._pending_time is not None:
             self._song_time, self._pending_time = self._pending_time, None
+        elif self.is_playing:
+            self._song_time += self.beats_per_tick
 
     def set_or_delete_cue(self):
         at = [c for c in self.cue_points if c.time == self._song_time]
@@ -195,6 +198,9 @@ class FakeSong:
         self.signature_numerator = self.signature_denominator = 4
         self.is_playing = False
         self._song_time, self._pending_time = 0.0, None
+        self.beats_per_tick = 0.0  # how far the playhead moves per update tick while playing
+        self.record_mode = self.session_automation_record = False
+        self.punch_in = self.punch_out = False
         self.loop, self.loop_start, self.loop_length = False, 0.0, 16.0
         self.metronome = False
         self.tracks = [FakeTrack("1-MIDI")]
@@ -224,6 +230,9 @@ class FakeSong:
         return position
 
     def start_playing(self):
+        self.is_playing = True
+
+    def continue_playing(self):
         self.is_playing = True
 
     def stop_playing(self):
@@ -296,3 +305,28 @@ def install():
     cs.ControlSurface = FakeControlSurface
     sys.modules["_Framework"] = fw
     sys.modules["_Framework.ControlSurface"] = cs
+
+
+class RecordingParam(FakeParam):
+    """Logs what Live would record into automation: values set while recording and playing."""
+
+    def __init__(self, song, *args, **kw):
+        self._song, self.recorded, self.gestures = song, [], []
+        super().__init__(*args, **kw)
+
+    @property
+    def value(self):
+        return self._value
+
+    @value.setter
+    def value(self, v):
+        self._value = v
+        song = getattr(self, "_song", None)
+        if song is not None and song.is_playing and song.record_mode and song.session_automation_record:
+            self.recorded.append((song.current_song_time, v))
+
+    def begin_gesture(self):
+        self.gestures.append("begin")
+
+    def end_gesture(self):
+        self.gestures.append("end")
