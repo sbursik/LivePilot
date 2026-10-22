@@ -352,42 +352,67 @@ def test_load_at_position_and_move_device(live, monkeypatch):
     assert moved["devices"] == ["Utility", "EQ Eight", "Ozone 11"]
 
 
+class WarpableClip(fake_live.FakeClip):
+    """An audio clip with Live's warp-marker rules."""
+    is_midi_clip, is_audio_clip = False, True
+    gain_display_string, pitch_coarse, pitch_fine, warp_mode = "0.0 dB", 0, 0.0, 0
+    sample_rate = 48000
+
+    def __init__(self, seconds=217.5, markers=((0.0, 0.0), (478.5, 217.5))):
+        super().__init__(seconds * 132 / 60)
+        self.sample_length = 48000 * seconds
+        self.looping, self.warping = False, False
+        # By default what Live gives an unwarped 217.5 s file in a 132 BPM set once warping is on.
+        self.real_markers = [fake_live.types.SimpleNamespace(beat_time=b, sample_time=s) for b, s in markers]
+
+    @property
+    def warp_markers(self):
+        # Like Live, list an unremovable marker 1/32 beat after the last real one.
+        last = max(self.real_markers, key=lambda m: m.beat_time)
+        return self.real_markers + [fake_live.types.SimpleNamespace(
+            beat_time=last.beat_time + 0.03125, sample_time=last.sample_time + 0.03125 * 60 / 132)]
+
+    def add_warp_marker(self, m):
+        # Live refuses a marker on an existing beat or one that runs backwards against a neighbour.
+        for other in self.real_markers:
+            if other.beat_time == m.beat_time or (other.beat_time - m.beat_time) * (other.sample_time - m.sample_time) < 0:
+                raise RuntimeError("invalid warp marker")
+        self.real_markers.append(m)
+
+    def remove_warp_marker(self, beat_time):
+        if not any(m.beat_time == beat_time for m in self.real_markers):
+            raise RuntimeError("no warp marker at %s" % beat_time)
+        if len(self.real_markers) == 1:
+            raise RuntimeError("a warped clip keeps one marker")
+        self.real_markers = [m for m in self.real_markers if m.beat_time != beat_time]
+
+
 def test_source_bpm_warps_whole_file_at_that_tempo(live):
     conn, song = live
-
-    class AudioClip(fake_live.FakeClip):
-        is_midi_clip, is_audio_clip = False, True
-        gain_display_string, pitch_coarse, pitch_fine, warp_mode = "0.0 dB", 0, 0.0, 0
-        sample_rate, sample_length = 48000, 48000 * 217.5  # a 217.5 s acapella
-
-        def __init__(self):
-            super().__init__(478.5)
-            self.looping, self.warping = False, False
-            # What Live gives an unwarped 217.5 s file in a 132 BPM set once warping is on.
-            self.real_markers = [fake_live.types.SimpleNamespace(beat_time=0.0, sample_time=0.0),
-                                 fake_live.types.SimpleNamespace(beat_time=478.5, sample_time=217.5)]
-
-        @property
-        def warp_markers(self):
-            # Like Live, list an unremovable marker 1/32 beat after the last real one.
-            last = max(self.real_markers, key=lambda m: m.beat_time)
-            return self.real_markers + [fake_live.types.SimpleNamespace(
-                beat_time=last.beat_time + 0.03125, sample_time=last.sample_time + 0.03125 * 60 / 132)]
-
-        def add_warp_marker(self, m):
-            self.real_markers.append(m)
-
-        def remove_warp_marker(self, beat_time):
-            if not any(m.beat_time == beat_time for m in self.real_markers):
-                raise RuntimeError("no warp marker at %s" % beat_time)
-            self.real_markers = [m for m in self.real_markers if m.beat_time != beat_time]
-
-    clip = AudioClip()
+    clip = WarpableClip()
     song.tracks[0].clip_slots[0].clip = clip
     result = conn.send("set_audio_clip_properties", track_index=0, slot_index=0, source_bpm=128)
     assert result["warping"] is True
     assert [(m.beat_time, m.sample_time) for m in clip.real_markers] == [(0.0, 0.0), (464.0, 217.5)]
     assert clip.end_marker == clip.loop_end == 464.0
+
+
+def test_warp_markers_replace_the_clips_own(live):
+    conn, song = live
+    # Live's auto-warp left markers that cross the new ones, and its first marker sits on beat 0
+    # where the new bar 1 needs a later sample.
+    clip = WarpableClip(10.0, ((0.0, 0.0), (8.0, 3.9), (21.0, 10.0)))
+    song.tracks[0].arrangement_clips = [clip]
+    markers = [{"beat_time": 0.0, "sample_time": 0.17}, {"beat_time": 4.0, "sample_time": 2.03},
+               {"beat_time": 8.0, "sample_time": 3.88}, {"beat_time": 21.2, "sample_time": 10.0}]
+    r = conn.send("set_warp_markers", track_index=0, arrangement_clip_index=0, markers=markers, warp_mode=6)
+    assert r["matches"] and r["markers"] == 4 and r["warp_mode"] == 6 and r["warping"]
+    assert sorted((m.beat_time, m.sample_time) for m in clip.real_markers) == [
+        (m["beat_time"], m["sample_time"]) for m in markers]
+    assert clip.end_marker == clip.loop_end == 21.2
+    with pytest.raises(LiveError, match="rising"):
+        conn.send("set_warp_markers", track_index=0, arrangement_clip_index=0,
+                  markers=[{"beat_time": 0, "sample_time": 1.0}, {"beat_time": 4, "sample_time": 0.5}])
 
 
 def test_copy_clip_to_a_slot_on_the_same_track(live, monkeypatch):
@@ -618,3 +643,35 @@ def test_record_automation_refuses_while_session_clips_play(live):
     song.tracks[0].playing_slot_index = 0
     with pytest.raises(LiveError, match="Session clips are playing"):
         conn.send("record_automation", lanes=[{"parameter": "volume", "points": [{"beat": 0, "value": 0.5}]}])
+
+
+def test_warp_to_grid_puts_every_stems_bars_on_the_grid(mcp_call, tmp_path):
+    from test_analysis import drifting_stems
+
+    call, song = mcp_call
+    (drums, chords), truth = drifting_stems(tmp_path)
+    for name, path in (("Drums", drums), ("Chords", chords)):
+        track = fake_live.FakeTrack(name)
+        track.has_midi_input, track.has_audio_input = False, True
+        clip = WarpableClip(40.0, ((0.0, 0.0), (88.0, 40.0)))
+        clip.name, clip.file_path = name, path
+        track.arrangement_clips = [clip]
+        song.tracks.append(track)
+
+    r = call("warp_to_grid", {})
+    assert r["applied"] is False and r["beats_tracked_on"] == ["Drums"]
+    assert r["bar_1_at_sec"] == pytest.approx(truth[1], abs=0.008)
+    assert [m.beat_time for m in song.tracks[1].arrangement_clips[0].real_markers] == [0.0, 88.0]
+
+    r = call("warp_to_grid", {"apply": True})
+    assert [(c["track"], c["warp_mode"], c["matches"]) for c in r["clips"]] == [
+        ("Drums", "beats", True), ("Chords", "complex_pro", True)]
+    for track in song.tracks[1:]:
+        markers = sorted((m.beat_time, m.sample_time) for m in track.arrangement_clips[0].real_markers)
+        # A marker on each bar's downbeat: beat 4n is the music's downbeat n + 1. (Past the music
+        # the tracker carries on in time with it.)
+        bars = [(b, s) for b, s in markers if b == int(b) and 1 + int(b) < len(truth)]
+        assert len(bars) == (len(truth) - 2) // 4 + 1
+        for beat, seconds in bars:
+            assert int(beat) % 4 == 0 and seconds == pytest.approx(truth[1 + int(beat)], abs=0.008)
+        assert markers[-1][1] == 40.0

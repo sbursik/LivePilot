@@ -66,6 +66,7 @@ The AI can't hear, so these tools measure audio and give it numbers to reason wi
 | `compare_to_reference` | Compares a mix with a reference: tonal balance after loudness matching, loudness, dynamics, width, low-end mono and key, with suggestions |
 | `analyze_frequency_space` | Shows which bands the set's audio fills, which are open, and which parts crowd each band |
 | `score_samples` | Ranks samples (files or a folder) by how well they fill open bands and fit the song key |
+| `warp_to_grid` | Tracks every beat and the downbeat of stems whose tempo drifts (e.g. Suno exports) and warps each clip with a marker on every bar, so the music's bars sit on Live's grid |
 
 Measurements: integrated, short-term and momentary loudness (LUFS, per ITU-R BS.1770-4),
 loudness range, true peak, crest factor, energy per band and octave, spectral centroid and

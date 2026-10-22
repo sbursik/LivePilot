@@ -29,6 +29,9 @@ Working style:
 - You can't hear audio. Before judging or changing a mix, measure it with the analyser tools
   (analyze_clip, analyze_audio_file, compare_to_reference, analyze_frequency_space,
   score_samples) and base decisions on those numbers.
+- Imported stems or recordings (AI-generated songs, live takes) often drift in tempo, so no
+  song tempo or source_bpm lines them up. Use warp_to_grid (report first, then apply) to warp
+  them bar by bar onto the grid.
 - Automation (filter sweeps, builds, fades, send throws) is written with record_automation,
   which records it in real time. Put every parameter that moves over the same span in one
   call: one pass records them all.
@@ -338,10 +341,80 @@ def set_audio_clip_properties(track_index: int, slot_index: int | None = None,
     arrangement_clip_index for an Arrangement clip. source_bpm is the tempo the file was
     recorded at (e.g. an acapella's stated BPM): it warps the whole file at that tempo so it
     follows the song tempo. Use it instead of trusting Live's auto-warp on vocals."""
-    modes = {"beats": 0, "tones": 1, "texture": 2, "repitch": 3, "complex": 4, "complex_pro": 6}
     return _send("set_audio_clip_properties", gain=gain, pitch_coarse=transpose_semitones,
-                 pitch_fine=detune_cents, warping=warping, warp_mode=modes[warp_mode] if warp_mode else None,
+                 pitch_fine=detune_cents, warping=warping,
+                 warp_mode=WARP_MODES[warp_mode] if warp_mode else None,
                  source_bpm=source_bpm, **_ref(track_index, slot_index, arrangement_clip_index))
+
+
+WARP_MODES = {"beats": 0, "tones": 1, "texture": 2, "repitch": 3, "complex": 4, "complex_pro": 6}
+RHYTHM_TRACK_WORDS = ("drum", "perc", "kick", "snare", "hat", "beat")
+
+
+@mcp.tool()
+def warp_to_grid(track_indices: list[int] | None = None, rhythm_track_indices: list[int] | None = None,
+                 beats_per_marker: int = 4, apply: bool = False) -> dict:
+    """Line up audio whose tempo drifts (AI-generated songs such as Suno stems, live takes) with
+    Live's grid: track every beat, find the downbeat, and warp each Arrangement clip with a
+    marker every beats_per_marker beats (default 4: every bar), so the music's bars land on the
+    grid's bars at the song tempo. For one song's stems, which start together; the clips should
+    start on a bar line. Beats are tracked on rhythm_track_indices (default: tracks named like
+    drums or percussion, else all) and the downbeat is found from all of them.
+    apply=False reports the tempo curve and downbeat; apply=True writes the markers (drum and
+    percussion tracks get Beats mode, the rest Complex Pro). Undo restores the clips."""
+    import soundfile as sf
+
+    clips = [c for c in _send("get_audio_clip_files", include_muted=True)
+             if "arrangement_clip_index" in c and (track_indices is None or c["track_index"] in track_indices)]
+    if not clips:
+        return {"error": "no audio clips in the Arrangement on those tracks"}
+    lengths = {c["file_path"]: sf.info(c["file_path"]).duration for c in clips}
+    if max(lengths.values()) - min(lengths.values()) > 0.05:
+        return {"error": "the files differ in length, so they aren't stems of one song that start together",
+                "files": {p: round(d, 2) for p, d in lengths.items()}}
+
+    def is_rhythm(c):
+        if rhythm_track_indices is not None:
+            return c["track_index"] in rhythm_track_indices
+        return any(w in c["track"].lower() for w in RHYTHM_TRACK_WORDS)
+
+    paths = sorted(lengths)
+    rhythm = sorted({c["file_path"] for c in clips if is_rhythm(c)})
+    grid = _analysis().beats.beat_grid(paths, rhythm or None, _song_tempo())
+    beats, first = grid["beats"], grid["first_downbeat"]
+    picks = list(range(first, len(beats), max(1, int(beats_per_marker))))
+    if picks[-1] != len(beats) - 1:
+        picks.append(len(beats) - 1)
+    markers = [{"beat_time": float(i - first), "sample_time": beats[i]} for i in picks]
+    tail = grid["duration_sec"] - beats[-1]
+    if tail > 0.01:  # the audio after the last beat, at the last beat's tempo
+        markers.append({"beat_time": len(beats) - 1 - first + tail / (beats[-1] - beats[-2]),
+                        "sample_time": grid["duration_sec"]})
+    result: dict = {
+        "applied": apply, "song_tempo": _song_tempo(), "tempo_bpm": grid["tempo_bpm"],
+        "steady": grid["steady"], "onset_jitter_ms": grid["onset_jitter_ms"],
+        "beats_tracked_on": [c["track"] for c in clips if c["file_path"] in rhythm] or "all tracks",
+        "bar_1_at_sec": round(beats[first], 3), "downbeat_confidence": grid["downbeat_confidence"],
+        "markers_per_clip": len(markers),
+        "bars": grid["bars"][::8],
+    }
+    if beats[first] > 0.05:
+        result["note"] = (f"The first {beats[first]:.2f} s of each file comes before bar 1, so it sits "
+                          "before the clip start; drag the clip start left in Live if it holds a pickup.")
+    if grid["downbeat_confidence"] < 0.1:
+        result["downbeat_warning"] = ("The downbeat is uncertain: check that bar 1 starts on the first beat "
+                                      "of a bar, and move the clips by a beat if not.")
+    if apply:
+        done = []
+        for c in clips:
+            mode = WARP_MODES["beats"] if is_rhythm(c) else WARP_MODES["complex_pro"]
+            r = _send("set_warp_markers", track_index=c["track_index"],
+                      arrangement_clip_index=c["arrangement_clip_index"], markers=markers, warp_mode=mode)
+            done.append({"track": c["track"], "clip": c["name"], "markers": r["markers"],
+                         "matches": r["matches"],
+                         "warp_mode": next(k for k, v in WARP_MODES.items() if v == r["warp_mode"])})
+        result["clips"] = done
+    return result
 
 
 @mcp.tool()

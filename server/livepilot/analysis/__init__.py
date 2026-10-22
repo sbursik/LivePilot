@@ -5,7 +5,7 @@ import os
 from collections import OrderedDict
 from pathlib import Path
 
-from . import compare, features
+from . import beats, compare, features
 from .features import public
 
 AUDIO_EXTENSIONS = {".wav", ".aif", ".aiff", ".flac", ".mp3", ".ogg"}
@@ -43,4 +43,4 @@ def find_audio_files(folder: str, limit: int = 200) -> list[str]:
     return found
 
 
-__all__ = ["analyze", "compare", "features", "find_audio_files", "public", "AUDIO_EXTENSIONS"]
+__all__ = ["analyze", "beats", "compare", "features", "find_audio_files", "public", "AUDIO_EXTENSIONS"]

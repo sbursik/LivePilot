@@ -263,3 +263,42 @@ def test_played_region_of_trimmed_arrangement_clip():
     assert _played_beats(dict(session, looping=True, loop_start=0.0, loop_end=32.0))[:2] == (0.0, 32.0)
     trimmed = dict(info, start_marker=0.0)  # unlooped arrangement clip: also from loop_start
     assert _played_beats(trimmed)[:2] == (8.0, 200.0)
+
+
+def drifting_stems(tmp_path, bpm_from=120.0, bpm_to=126.0, seconds=40.0, first_beat=0.3, sr=SR):
+    """Drums and chords whose tempo ramps like a Suno song. The music starts on a pickup beat,
+    so the first downbeat is the second beat. Returns (paths, beat times)."""
+    beats, t = [], first_beat
+    while t < seconds - 1:
+        beats.append(t)
+        t += 60.0 / (bpm_from + (bpm_to - bpm_from) * t / seconds)
+    n = int(seconds * sr)
+    drums, chords = np.zeros(n), np.zeros(n)
+    rng = np.random.default_rng(1)
+    kick = np.sin(2 * np.pi * 55 * np.arange(int(0.15 * sr)) / sr) * np.exp(-np.arange(int(0.15 * sr)) / (0.04 * sr))
+    snare = rng.standard_normal(int(0.08 * sr)) * np.exp(-np.arange(int(0.08 * sr)) / (0.02 * sr))
+    progression = [(57, 60, 64), (53, 57, 60), (55, 59, 62), (52, 55, 59)]  # Am F G Em
+    for k, b in enumerate(beats):
+        i = int(b * sr)
+        hit = kick if (k - 1) % 2 == 0 else 0.4 * snare  # kick on 1 and 3, snare on 2 and 4
+        drums[i:i + len(hit)] += 0.8 * hit[:n - i]
+        if (k - 1) % 4 == 0 and k + 4 < len(beats):  # a new chord each bar, from the downbeat
+            j = int(beats[k + 4] * sr)
+            tt = np.arange(j - i) / sr
+            chords[i:j] += sum(0.15 * np.sin(2 * np.pi * 440 * 2 ** ((p - 69) / 12) * tt)
+                               for p in progression[(k // 4) % 4]) * np.exp(-tt / 1.5)
+    return [write(tmp_path, "drums.wav", drums), write(tmp_path, "chords.wav", chords)], np.array(beats)
+
+
+def test_beat_grid_follows_a_drifting_tempo_and_finds_the_downbeat(tmp_path):
+    from livepilot.analysis import beats
+
+    (drums, chords), truth = drifting_stems(tmp_path)
+    g = beats.beat_grid([drums, chords], [drums], tempo_hint=123)
+    found = np.array(g["beats"])
+    near = np.array([found[np.argmin(np.abs(found - t))] for t in truth])
+    assert np.max(np.abs(near - truth)) < 0.008
+    assert found[g["first_downbeat"]] == pytest.approx(truth[1], abs=0.008)
+    assert g["tempo_bpm"]["start"] == pytest.approx(120.5, abs=0.7)
+    assert g["tempo_bpm"]["end"] == pytest.approx(125.5, abs=0.7)
+    assert g["steady"] is False

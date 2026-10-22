@@ -793,11 +793,7 @@ class Handlers(object):
         first_beat, first_sec = (markers[0].beat_time, markers[0].sample_time) if markers else (0.0, 0.0)
         seconds = c.sample_length / float(c.sample_rate)
         end_beat = first_beat + (seconds - first_sec) * bpm / 60.0
-        try:
-            marker = Live.Clip.WarpMarker(beat_time=end_beat, sample_time=seconds)
-        except Exception:
-            marker = {"beat_time": end_beat, "sample_time": seconds}
-        c.add_warp_marker(marker)
+        c.add_warp_marker(self._warp_marker(end_beat, seconds))
         for m in markers[1:]:
             if abs(m.beat_time - end_beat) > 1e-6:
                 # Live lists a marker 1/32 beat after the last real one; it can't be removed and
@@ -806,12 +802,74 @@ class Handlers(object):
                     c.remove_warp_marker(m.beat_time)
                 except Exception:
                     pass
+        self._end_markers_at(c, end_beat)
+
+    @staticmethod
+    def _warp_marker(beat_time, sample_time):
+        try:
+            return Live.Clip.WarpMarker(beat_time=beat_time, sample_time=sample_time)
+        except Exception:
+            return {"beat_time": beat_time, "sample_time": sample_time}
+
+    @staticmethod
+    def _end_markers_at(c, end_beat):
         # Unwarped, the end markers were in seconds; put them on the file's end in beats.
         for attr in ("end_marker", "loop_end"):
             try:
                 setattr(c, attr, end_beat)
             except Exception:
                 pass
+
+    def cmd_set_warp_markers(self, track_index, slot_index=None, *, arrangement_clip_index=None, markers,
+                             warp_mode=None):
+        """Warp an audio clip with exactly these markers ([{beat_time, sample_time}], sample_time in
+        file seconds), replacing its others, e.g. one per bar from a beat tracker so a recording
+        whose tempo drifts follows the grid. The clip's end markers move to the last marker."""
+        c = self._clip(track_index, slot_index, arrangement_clip_index)
+        if not c.is_audio_clip:
+            raise CommandError("clip is not an audio clip")
+        if not hasattr(c, "add_warp_marker"):
+            raise CommandError("this Live version can't set warp markers from a script (needs Live 11+)")
+        wanted = sorted((float(m["beat_time"]), float(m["sample_time"])) for m in markers)
+        if len(wanted) < 2 or any(b2 <= b1 or s2 <= s1 for (b1, s1), (b2, s2) in zip(wanted, wanted[1:])):
+            raise CommandError("markers need at least two, rising in both beat_time and sample_time")
+        c.warping = True
+        if warp_mode is not None:
+            c.warp_mode = int(warp_mode)
+
+        def existing():
+            return sorted((m.beat_time, m.sample_time) for m in c.warp_markers)
+
+        def remove(beat_time):
+            # Live lists a marker 1/32 beat after the last real one that can't be removed.
+            try:
+                c.remove_warp_marker(beat_time)
+            except Exception:
+                pass
+
+        # Live keeps at least one marker and refuses one that would run backwards against a
+        # neighbour, so clear down to one, add every marker that fits around it, then replace it.
+        for b, _ in existing()[1:]:
+            remove(b)
+        keep_b, keep_s = existing()[0]
+        later = []
+        for b, s in wanted:
+            if abs(b - keep_b) < 1e-9 and abs(s - keep_s) < 1e-9:
+                continue
+            if (b - keep_b) * (s - keep_s) > 0:
+                c.add_warp_marker(self._warp_marker(b, s))
+            else:
+                later.append((b, s))
+        if not any(abs(b - keep_b) < 1e-9 and abs(s - keep_s) < 1e-9 for b, s in wanted):
+            remove(keep_b)
+        for b, s in later:
+            c.add_warp_marker(self._warp_marker(b, s))
+        self._end_markers_at(c, wanted[-1][0])
+        got = [(b, s) for b, s in existing() if b <= wanted[-1][0] + 1e-6]
+        return {"warping": c.warping, "warp_mode": int(c.warp_mode), "markers": len(got),
+                "matches": len(got) == len(wanted) and all(
+                    abs(b1 - b2) < 1e-4 and abs(s1 - s2) < 1e-4 for (b1, s1), (b2, s2) in zip(got, wanted)),
+                "end_marker": c.end_marker}
 
     # ----------------------------------------------------------------- notes
 
