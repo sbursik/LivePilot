@@ -400,3 +400,102 @@ def test_markers_on_an_unlooped_clip_set_its_region(live):
     result = conn.send("set_clip_loop", track_index=0, slot_index=0, start_marker=32, end_marker=192)
     assert (result["loop_start"], result["loop_end"]) == (32.0, 192.0)
     assert (result["start_marker"], result["end_marker"]) == (32.0, 192.0)
+
+
+def test_menu_entries_match_by_number_or_prefix(live):
+    conn, song = live
+    song.tracks[0].devices.append(fake_live.live_device("Glue Compressor"))
+
+    def show(param, text):
+        return conn.send("set_device_parameter", track_index=0, device_index=0, parameter=param,
+                         display_value=text)["display"]
+
+    assert show("Ratio", "2:1") == "2"
+    assert show("Attack", "10 ms") == "10"
+    assert show("Attack", "0.30") == "0.3"
+    assert show("Release", "Auto") == "A"
+    with pytest.raises(LiveError, match="not in"):
+        show("Ratio", "3")
+
+
+@pytest.fixture()
+def mcp_call(live, monkeypatch):
+    import asyncio
+    import json
+
+    import Live
+    from livepilot import server
+
+    conn, song = live
+    monkeypatch.setattr(server, "live", conn)
+    browser = Live.Application.get_application().browser
+    monkeypatch.setattr(browser, "load_item",
+                        lambda item: song.view.selected_track.devices.append(fake_live.live_device(item.name)))
+
+    def call(tool, args):
+        result = asyncio.run(server.mcp.call_tool(tool, args))
+        assert len(result.content) == 1
+        return json.loads(result.content[0].text)
+
+    return call, song
+
+
+def _tone(path, amplitude, seconds=6, sr=44100):
+    import numpy as np
+    import soundfile as sf
+    t = np.arange(seconds * sr) / sr
+    sf.write(path, amplitude * np.sin(2 * np.pi * 997 * t), sr)
+    return path
+
+
+def test_master_chain_then_match_loudness(mcp_call, tmp_path):
+    call, song = mcp_call
+    chain = call("build_master_chain", {"target": "streaming"})
+    assert chain["chain"] == ["Glue Compressor", "Limiter"] and "failed" not in chain
+    glue, limiter = song.master_track.devices
+    assert [p.str_for_value(p.value) for p in glue.parameters[1:4]] == ["2", "10", "A"]
+    assert limiter.parameters[2].str_for_value(limiter.parameters[2].value) == "-1.0 dB"
+    assert call("build_master_chain", {})["added"] == []  # nothing added twice
+
+    # A 997 Hz sine at -20 dBFS peak reads -23 LUFS (EBU test signal), 9 LU under streaming.
+    mix = _tone(str(tmp_path / "mix.wav"), 10 ** (-20 / 20))
+    r = call("match_loudness", {"mix_path": mix})
+    assert abs(r["measured_lufs"] + 23.0) < 0.2 and abs(r["change_db"] - 9.0) < 0.2
+    assert abs(limiter.parameters[1].value - 9.0) < 0.2 and "warning" in r
+
+    on_target = _tone(str(tmp_path / "loud.wav"), 10 ** (-11 / 20))
+    assert call("match_loudness", {"mix_path": on_target})["status"].startswith("on target")
+
+
+def test_match_loudness_uses_a_utility_before_a_plugin(mcp_call, tmp_path):
+    call, song = mcp_call
+    song.master_track.devices[:] = [fake_live.FakeDevice("Ozone 11", class_name="PluginDevice")]
+    assert "error" in call("build_master_chain", {})
+    r = call("match_loudness", {"mix_path": _tone(str(tmp_path / "mix.wav"), 10 ** (-17 / 20))})
+    assert [d.name for d in song.master_track.devices] == ["Utility", "Ozone 11"]
+    assert song.master_track.devices[0].parameters[1].value == pytest.approx(6.0, abs=0.2)  # -20 LUFS -> -14
+    assert "Ozone 11" in r["note"]
+
+
+def test_gain_stage_sets_faders_to_the_target(mcp_call, tmp_path):
+    call, song = mcp_call
+
+    class AudioClip(fake_live.FakeClip):
+        is_midi_clip, is_audio_clip = False, True
+        gain_display_string, pitch_coarse, pitch_fine, warping, warp_mode, warp_markers = "-3.0 dB", 0, 0.0, False, 0, []
+
+    vox = fake_live.FakeTrack("Vox")
+    vox.has_midi_input, vox.has_audio_input = False, True
+    clip = AudioClip(16, 0.0)
+    clip.name, clip.file_path = "Lead", _tone(str(tmp_path / "vox.wav"), 10 ** (-20 / 20))
+    vox.arrangement_clips = [clip]
+    song.tracks.append(vox)
+
+    # Source -23 LUFS plus -3 dB clip gain = -26; with a +2 offset the target is -16: fader +10,
+    # beyond the fader's +6.
+    r = call("gain_stage", {"target_lufs": -18.0, "track_offsets": {"vox": 2.0}})
+    t = r["tracks"][0]
+    assert t["source_lufs"] == pytest.approx(-26.0, abs=0.2) and t["fader_db"] == 6.0 and "note" in t
+    assert r["applied"] is False and song.tracks[1].mixer_device.volume.value == 0.85
+    r = call("gain_stage", {"target_lufs": -30.0, "apply": True})
+    assert r["tracks"][0]["fader_set"] == "-4.0 dB"

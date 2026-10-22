@@ -872,6 +872,24 @@ class Handlers(object):
                 return p
         raise CommandError("no parameter %r on %s" % (parameter, device.name))
 
+    def _match_item(self, items, text):
+        """Index of the menu entry meaning `text`: exact (any case), then the same number ('10'
+        for '10.0', '2' for '2:1'), then the only entry starting with it ('A' for 'Auto')."""
+        lowered = [i.lower() for i in items]
+        t = text.strip().lower()
+        if t in lowered:
+            return lowered.index(t)
+        want = self._parse_display(t)
+        if want is not None:
+            for i, item in enumerate(items):
+                got = self._parse_display(item)
+                if got is not None and abs(got[0] - want[0]) < 1e-9 and (not want[1] or got[1] in ("", want[1])):
+                    return i
+        starts = [i for i, item in enumerate(lowered) if item.startswith(t) or (item and t.startswith(item))]
+        if len(starts) == 1:
+            return starts[0]
+        raise CommandError("%r not in %s" % (text, items))
+
     def cmd_set_device_parameter(self, track_index, device_index, parameter, value=None, display_value=None,
                                  kind="track"):
         """parameter: index or name. value: raw value. display_value: what the parameter should
@@ -881,10 +899,7 @@ class Handlers(object):
         p = self._find_param(d, parameter)
         if display_value is not None and p.is_quantized:
             items = list(p.value_items)
-            lowered = [i.lower() for i in items]
-            if str(display_value).lower() not in lowered:
-                raise CommandError("%r not in %s" % (display_value, items))
-            p.value = p.min + lowered.index(str(display_value).lower())
+            p.value = p.min + self._match_item(items, str(display_value))
         elif display_value is not None:
             self._set_param_display(p, str(display_value))
         elif value is not None:

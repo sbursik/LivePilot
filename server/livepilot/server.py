@@ -29,14 +29,19 @@ Working style:
 - You can't hear audio. Before judging or changing a mix, measure it with the analyser tools
   (analyze_clip, analyze_audio_file, compare_to_reference, analyze_frequency_space,
   score_samples) and base decisions on those numbers.
+- Mixing and mastering order: gain_stage for a starting balance (report first, apply once the
+  user agrees), then mix moves, then build_master_chain, then the user exports the whole song
+  and match_loudness sets the final level. Repeat export + match_loudness until on target.
 """
+import math
 import os
+import re
 from typing import Any, Literal
 
 from mcp.server.mcpserver import MCPServer
 
 from . import music
-from .connection import LiveConnection
+from .connection import LiveConnection, LiveError
 
 TrackKind = Literal["track", "return", "master"]
 
@@ -601,6 +606,11 @@ def load_device_by_name(name: str, track_index: int,
     it with this tool rather than substituting a Live instrument. If nothing matches, report that
     instead of loading something else. Effects go at the end of the chain unless you pass
     position (0 = first device)."""
+    return _load_by_name(name, track_index, type, kind, position)
+
+
+def _load_by_name(name: str, track_index: int, type: str = "any", kind: str = "track",
+                  position: int | None = None) -> dict:
     found: list[dict] = []
     for category in _LOAD_ORDER[type]:
         found = _send("search_browser", query=name, category=category, max_results=10)["results"]
@@ -744,19 +754,24 @@ def analyze_clip(track_index: int, slot_index: int | None = None,
     if info.get("is_midi"):
         return {"error": "MIDI clip: there is no audio to analyse. Bounce or freeze and flatten the track, "
                          "or export it, then use analyze_audio_file."}
-    start = end = None
-    region = {"description": "whole file (clip is unwarped, so its markers can't be mapped to the file)"}
-    markers = info.get("warp_markers") or []
-    if info.get("warping") and len(markers) >= 2:
-        b0, b1, description = _played_beats(info)
-        start = max(0.0, _beats_to_seconds(b0, markers))
-        end = _beats_to_seconds(b1, markers)
-        region = {"description": description, "clip_beats": [round(b0, 3), round(b1, 3)],
-                  "file_seconds": [round(start, 3), round(end, 3)]}
+    start, end, region = _clip_region(info)
     a = _analysis()
     result = a.public(a.analyze(info["file_path"], start, end, _song_tempo()))
     result["clip"] = {"name": info["name"], "region": region}
     return result
+
+
+def _clip_region(info: dict) -> tuple[float | None, float | None, dict]:
+    """The part of the clip's file that it plays, in file seconds (None = file start/end)."""
+    markers = info.get("warp_markers") or []
+    if not (info.get("warping") and len(markers) >= 2):
+        return None, None, {"description": "whole file (clip is unwarped, so its markers can't be "
+                                           "mapped to the file)"}
+    b0, b1, description = _played_beats(info)
+    start = max(0.0, _beats_to_seconds(b0, markers))
+    end = _beats_to_seconds(b1, markers)
+    return start, end, {"description": description, "clip_beats": [round(b0, 3), round(b1, 3)],
+                        "file_seconds": [round(start, 3), round(end, 3)]}
 
 
 def _played_beats(info: dict) -> tuple[float, float, str]:
@@ -917,6 +932,205 @@ def score_samples(candidate_paths: list[str] | None = None, folder: str | None =
                           "Pass bounced stems as context_paths for frequency-fit scoring.")
     if skipped:
         result["skipped"] = skipped
+    return result
+
+
+# ---------------------------------------------------------- mix and master
+
+# Integrated loudness (LUFS) and true-peak ceiling (dBTP) for common destinations.
+LOUDNESS_TARGETS = {
+    "streaming": (-14.0, -1.0),  # Spotify, YouTube and Tidal normalise to about -14 LUFS
+    "apple": (-16.0, -1.0),      # Apple Music normalises to -16
+    "club": (-8.0, -0.5),        # loud dance masters for DJ sets; streaming will turn them down
+    "broadcast": (-23.0, -1.0),  # EBU R128
+}
+LoudnessTarget = Literal["streaming", "apple", "club", "broadcast"]
+
+
+def _db(text: str | None) -> float | None:
+    """'-3.5 dB' -> -3.5; '-inf dB' -> -inf; None if the text isn't a dB value."""
+    m = re.search(r"(-?inf|[-+]?\d*\.?\d+)\s*dB", text or "", re.IGNORECASE)
+    return float(m.group(1)) if m else None
+
+
+def _try_set(device_index: int, parameter: str, display: str, kind: str = "master",
+             track_index: int = 0) -> tuple[bool, str]:
+    try:
+        r = _send("set_device_parameter", track_index=track_index, device_index=device_index,
+                  parameter=parameter, display_value=display, kind=kind)
+        return True, f"{r['name']} = {r['display']}"
+    except LiveError as e:
+        return False, f"{parameter} -> {display}: {e}"
+
+
+def _devices(kind: str = "master", track_index: int = 0) -> list[dict]:
+    return _send("get_devices", track_index=track_index, kind=kind)
+
+
+@mcp.tool()
+def gain_stage(target_lufs: float = -18.0, track_offsets: dict[str, float] | None = None,
+               apply: bool = False) -> dict:
+    """Set a starting balance: measure each audio track's clips (the parts they play, with clip
+    gain) and work out the fader setting that brings each track to target_lufs, so every part
+    starts at the same loudness with headroom for the master. track_offsets adjusts single
+    tracks by name, in dB (e.g. {"Kick": 2, "Hats": -6}). apply=False only reports; apply=True
+    sets the faders. Measures source audio before effects: tracks with devices are flagged."""
+    a = _analysis()
+    by_track: dict[int, list[dict]] = {}
+    for c in _send("get_audio_clip_files"):
+        by_track.setdefault(c["track_index"], []).append(c)
+    offsets = {k.lower(): v for k, v in (track_offsets or {}).items()}
+    tempo = _song_tempo()
+    tracks, skipped = [], []
+    for ti, clips in sorted(by_track.items()):
+        # The Arrangement is what a mixdown plays; Session clips count only if there's nothing there.
+        clips = [c for c in clips if "arrangement_clip_index" in c] or clips
+        power = seconds = 0.0
+        for c in clips:
+            info = _send("get_clip_info", **_ref(ti, c.get("slot_index"), c.get("arrangement_clip_index")))
+            start, end, _ = _clip_region(info)
+            try:
+                r = a.analyze(info["file_path"], start, end, tempo, quick=True)
+            except Exception as e:
+                skipped.append(f"{c['track']}: {c['name']}: {e}")
+                continue
+            lufs = r.get("loudness", {}).get("integrated_lufs")
+            gain = _db(info.get("gain")) or 0.0
+            if lufs is None or gain == float("-inf"):
+                continue
+            power += r["duration_sec"] * 10 ** ((lufs + gain) / 10)
+            seconds += r["duration_sec"]
+        if not seconds:
+            continue
+        loud = 10 * math.log10(power / seconds)
+        track = _send("get_track_info", track_index=ti)
+        target = target_lufs + offsets.get(track["name"].lower(), 0.0)
+        fader = max(-70.0, min(6.0, target - loud))
+        entry: dict = {"track_index": ti, "track": track["name"], "source_lufs": round(loud, 1),
+                       "target_lufs": round(target, 1), "fader_now": track["volume"],
+                       "fader_db": round(fader, 1)}
+        if target - loud > 6.0:
+            entry["note"] = "needs more than the fader's +6 dB: raise the clip gain or add a Utility"
+        active = [d["name"] for d in track["devices"] if d["is_active"]]
+        if active:
+            entry["devices"] = active
+        if apply:
+            entry["fader_set"] = _send("set_track_volume", track_index=ti, db=round(fader, 1))["volume"]
+        tracks.append(entry)
+    result: dict = {"target_lufs": target_lufs, "applied": apply, "tracks": tracks}
+    if any("devices" in t for t in tracks):
+        result["warning"] = ("Tracks listing devices were measured before their effects; EQ, compression "
+                             "or saturation change their level. Check those by ear or with an export.")
+    missing = _unmeasured_tracks()
+    if missing:
+        result["not_measured"] = [m["track"] for m in missing]
+        result["note"] = ("MIDI/instrument tracks have no audio file to measure; set their faders by "
+                          "ear against the staged tracks, or bounce them and run this again.")
+    if skipped:
+        result["skipped"] = skipped
+    return result
+
+
+@mcp.tool()
+def build_master_chain(target: LoudnessTarget = "streaming", glue: bool = True,
+                       force: bool = False) -> dict:
+    """Put a basic master chain on the master track with Live's devices: Glue Compressor (2:1,
+    10 ms attack, auto release) for gentle glue, then Limiter with its ceiling at the target's
+    true-peak limit. Reuses a Limiter that's already there. Refuses if the master already has a
+    third-party plugin (e.g. Ozone), unless force. Then export the mix and run match_loudness
+    to set the limiter's gain."""
+    lufs, ceiling = LOUDNESS_TARGETS[target]
+    devices = _devices()
+    plugins = [d["name"] for d in devices if "Plugin" in d["class_name"]]
+    if plugins and not force:
+        return {"error": f"the master already has {', '.join(plugins)}. Adding Live's limiter as well "
+                         "would limit twice. Use match_loudness, which works with the existing chain, "
+                         "or pass force=True to build the Live chain anyway."}
+    done, failed, added = [], [], []
+    limiter = next((d["index"] for d in devices if d["class_name"] == "Limiter"), None)
+    if glue and not any(d["class_name"] == "GlueCompressor" for d in devices):
+        _load_by_name("Glue Compressor", 0, "audio_effect", "master", position=limiter)
+        added.append("Glue Compressor")
+    devices = _devices()
+    if limiter is None:
+        _load_by_name("Limiter", 0, "audio_effect", "master")
+        added.append("Limiter")
+        devices = _devices()
+    for d in devices:
+        if d["class_name"] == "GlueCompressor" and "Glue Compressor" in added:
+            for name, value in (("Ratio", "2"), ("Attack", "10"), ("Release", "A")):
+                ok, msg = _try_set(d["index"], name, value)
+                (done if ok else failed).append(f"Glue Compressor: {msg}")
+        if d["class_name"] == "Limiter":
+            ok, msg = _try_set(d["index"], "Ceiling", f"{ceiling} dB")
+            (done if ok else failed).append(f"Limiter: {msg}")
+    result: dict = {"target": target, "target_lufs": lufs, "true_peak_ceiling": ceiling,
+                    "added": added, "set": done, "chain": [d["name"] for d in _devices()],
+                    "next": ("Glue's threshold depends on the mix level and Live doesn't report gain "
+                             "reduction to scripts: ask the user to pull Threshold down until the meter "
+                             "shows 1-2 dB of reduction. Then export the mix and call match_loudness.")}
+    if failed:
+        result["failed"] = failed
+    return result
+
+
+@mcp.tool()
+def match_loudness(mix_path: str, target: LoudnessTarget | None = "streaming",
+                   target_lufs: float | None = None, true_peak_ceiling: float | None = None) -> dict:
+    """Bring the master to a loudness target from an exported mixdown: measures mix_path (export
+    the whole song from the master), then raises or lowers the gain into the master's Limiter by
+    the difference and sets its ceiling. With no Live Limiter on the master (e.g. Ozone), it
+    uses a Utility at the start of the master chain instead, adding one if needed. Limiting
+    harder doesn't raise loudness one-for-one, so export again and repeat until it's within
+    0.5 LU. target picks a preset; target_lufs/true_peak_ceiling override it."""
+    lufs, ceiling = LOUDNESS_TARGETS[target] if target else (-14.0, -1.0)
+    lufs = lufs if target_lufs is None else target_lufs
+    ceiling = ceiling if true_peak_ceiling is None else true_peak_ceiling
+    loud = _analysis().analyze(mix_path)["loudness"]
+    measured, peak = loud.get("integrated_lufs"), loud.get("true_peak_dbtp")
+    if measured is None:
+        return {"error": f"{mix_path} is silent or too short to measure"}
+    delta = round(lufs - measured, 1)
+    result: dict = {"measured_lufs": measured, "measured_true_peak": peak, "target_lufs": lufs,
+                    "true_peak_ceiling": ceiling, "change_db": delta}
+    if abs(delta) <= 0.5 and (peak is None or peak <= ceiling + 0.1):
+        result["status"] = "on target; nothing changed"
+        return result
+    devices = _devices()
+    limiter = next((d for d in devices if d["class_name"] == "Limiter"), None)
+    if limiter:
+        params = _send("get_device_parameters", track_index=0, device_index=limiter["index"], kind="master")
+        gain = next((p for p in params["parameters"] if p["name"].lower() == "gain"), None)
+        if gain is None:
+            return {**result, "error": "the Limiter has no Gain parameter exposed"}
+        now = _db(gain["display"]) or 0.0
+        ok, msg = _try_set(limiter["index"], "Gain", f"{now + delta:.1f} dB")
+        result["limiter_gain"] = msg
+        ok2, msg2 = _try_set(limiter["index"], "Ceiling", f"{ceiling} dB")
+        result["limiter_ceiling"] = msg2
+        if not (ok and ok2):
+            result["error"] = "couldn't set the Limiter; see limiter_gain/limiter_ceiling"
+    else:
+        utility = devices[0] if devices and devices[0]["class_name"] == "StereoGain" else None
+        if utility is None:
+            _load_by_name("Utility", 0, "audio_effect", "master", position=0)
+            utility = _devices()[0]
+            result["added"] = "Utility at the start of the master chain"
+        params = _send("get_device_parameters", track_index=0, device_index=utility["index"], kind="master")
+        gain = next((p for p in params["parameters"] if p["name"].lower() == "gain"), None)
+        now = _db(gain["display"]) if gain else 0.0
+        ok, msg = _try_set(utility["index"], "Gain", f"{(now or 0.0) + delta:.1f} dB")
+        result["utility_gain"] = msg
+        plugins = [d["name"] for d in devices if "Plugin" in d["class_name"]]
+        result["note"] = ("Gain goes in before the rest of the master chain"
+                          + (f"; set the ceiling in {', '.join(plugins)} to {ceiling} dBTP yourself, "
+                             "since it doesn't expose it" if plugins else
+                             "; there's no limiter on the master, so peaks aren't controlled. Consider "
+                             "build_master_chain."))
+    if delta > 6:
+        result["warning"] = (f"{delta} dB is a big push into the limiter: it will squash transients and "
+                             "won't gain the full amount. Consider raising the mix level first.")
+    result["next"] = "Export the mix again and call match_loudness with the new file to check."
     return result
 
 

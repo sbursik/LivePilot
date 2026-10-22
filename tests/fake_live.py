@@ -17,6 +17,8 @@ class FakeParam:
                 return "-inf dB"
             db = (v - 0.85) * 40.0 if v >= 0.85 else -70 * (1 - v / 0.85) ** 1.5
             return "%.1f dB" % db
+        if self._kind == "db":  # value is the dB figure itself
+            return "%.1f dB" % v
         if self._kind == "freq":  # log sweep like EQ Eight: 0 -> 20 Hz, 1 -> 20 kHz
             hz = 20.0 * 1000.0 ** v
             return "%.0f Hz" % hz if hz < 1000 else "%.2f kHz" % (hz / 1000)
@@ -29,9 +31,36 @@ class FakeParam:
 class FakeDevice:
     class_name, type, is_active = "AudioEffectGroupDevice", 2, True
 
-    def __init__(self, name, parameters=()):
+    def __init__(self, name, parameters=(), class_name=None):
         self.name = name
         self.parameters = [FakeParam("Device On", 1.0)] + list(parameters)
+        if class_name:
+            self.class_name = class_name
+
+
+class FakeMenuParam(FakeParam):
+    def __init__(self, name, items, index=0):
+        super().__init__(name, float(index), 0.0, float(len(items) - 1))
+        self.is_quantized, self.value_items = True, list(items)
+
+    def str_for_value(self, v):
+        return self.value_items[int(round(v))]
+
+
+def live_device(name):
+    """Live's own devices as the master-chain tools see them."""
+    if name == "Limiter":
+        return FakeDevice("Limiter", [FakeParam("Gain", 0.0, -24.0, 24.0, kind="db"),
+                                      FakeParam("Ceiling", 0.0, -24.0, 0.0, kind="db")], "Limiter")
+    if name == "Glue Compressor":
+        return FakeDevice("Glue Compressor", [
+            FakeMenuParam("Ratio", ["2", "4", "10"], 1),
+            FakeMenuParam("Attack", ["0.01", "0.1", "0.3", "1", "3", "10", "30"]),
+            FakeMenuParam("Release", ["0.1", "0.2", "0.4", "0.6", "0.8", "1.2", "A"]),
+            FakeParam("Threshold", 0.0, -40.0, 0.0, kind="db")], "GlueCompressor")
+    if name == "Utility":
+        return FakeDevice("Utility", [FakeParam("Gain", 0.0, -35.0, 35.0, kind="db")], "StereoGain")
+    return FakeDevice(name)
 
 
 class FakeMixer:
@@ -235,7 +264,8 @@ def fake_browser(samples=40000):
     serum = FakeItem("Serum 2", device=True)
     return types.SimpleNamespace(
         instruments=FakeItem("Instruments", [FakeItem("Operator", device=True), FakeItem("Wavetable", device=True)]),
-        audio_effects=FakeItem("Audio Effects", [FakeItem("EQ Eight", device=True)]),
+        audio_effects=FakeItem("Audio Effects", [FakeItem(n, device=True) for n in
+                                                 ("EQ Eight", "Glue Compressor", "Limiter", "Utility")]),
         midi_effects=FakeItem("MIDI Effects", [FakeItem("Arpeggiator", device=True)]),
         drums=FakeItem("Drums", [FakeItem("808 Core Kit.adg")]),
         sounds=FakeItem("Sounds", [FakeItem("Serum Bass Lead.adv")]),

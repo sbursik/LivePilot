@@ -61,7 +61,7 @@ The AI can't hear, so these tools measure audio and give it numbers to reason wi
 
 | Tool | What it does |
 |---|---|
-| `analyze_clip` | Analyses an audio clip in the set (Session or Arrangement), limited to its start/end markers when warped |
+| `analyze_clip` | Analyses an audio clip in the set (Session or Arrangement), limited to the part the clip plays when warped |
 | `analyze_audio_file` | Analyses any wav/aif/flac/mp3/ogg file: mixdowns, stems, references, samples |
 | `compare_to_reference` | Compares a mix with a reference: tonal balance after loudness matching, loudness, dynamics, width, low-end mono and key, with suggestions |
 | `analyze_frequency_space` | Shows which bands the set's audio fills, which are open, and which parts crowd each band |
@@ -74,6 +74,19 @@ compatibility, and energy over time.
 
 The analyser reads audio files, so MIDI and instrument tracks (e.g. Serum) aren't measured until
 you bounce or export them. The frequency-space tools say which tracks they couldn't include.
+
+## Mix and master
+
+| Tool | What it does |
+|---|---|
+| `gain_stage` | Measures each audio track's clips and works out (or sets) the fader that brings it to a target loudness, as a starting balance |
+| `build_master_chain` | Adds Glue Compressor and Limiter to the master, with the ceiling at the target's true-peak limit |
+| `match_loudness` | Measures an exported mixdown and adjusts the master Limiter's gain (or a Utility before a plugin like Ozone) to hit a target: streaming −14, Apple −16, club −8 or broadcast −23 LUFS |
+| `set_device_parameter` | Takes values with units (`"350 Hz"`, `"-18 dB"`, `"150 ms"`) as well as raw values |
+| `move_device` | Reorders a chain; the load tools also take a `position` |
+
+Live's script API can't render or export audio, so loudness is checked from a mixdown you
+export: export, run `match_loudness`, and repeat until it reports on target.
 
 ## Development
 
@@ -102,5 +115,5 @@ Not yet verified on a Mac. First run there:
 
 - [x] Bridge (Remote Script) and MCP server
 - [x] Audio analyser: band energy, brightness, rhythmic density, key, LUFS, reference matching, sample-fit scoring
-- [ ] Mix and master helpers: gain staging to target levels, master chain, LUFS targeting
+- [x] Mix and master helpers: gain staging to target levels, master chain, LUFS targeting
 - [ ] Standalone desktop app with built-in chat (user's own Anthropic API key) and installers for both OSes
