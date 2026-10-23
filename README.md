@@ -85,6 +85,8 @@ you bounce or export them. The frequency-space tools say which tracks they could
 | `match_loudness` | Measures an exported mixdown and adjusts the master Limiter's gain (or a Utility before a plugin like Ozone) to hit a target: streaming −14, Apple −16, club −8 or broadcast −23 LUFS |
 | `set_device_parameter` | Takes values with units (`"350 Hz"`, `"-18 dB"`, `"150 ms"`) as well as raw values |
 | `move_device` | Reorders a chain; the load tools also take a `position` |
+| `record_automation` | Writes Arrangement automation (sweeps, builds, fades, send throws) by recording it in real time, several parameters in one pass |
+| `warp_to_grid` | Tracks the beats of stems whose tempo drifts (e.g. AI-generated songs) and warps each clip bar by bar onto Live's grid |
 
 Live's script API can't render or export audio, so loudness is checked from a mixdown you
 export: export, run `match_loudness`, and repeat until it reports on target.
