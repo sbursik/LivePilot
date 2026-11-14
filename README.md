@@ -106,7 +106,7 @@ surface (or restart Live).
 
 ## macOS checklist
 
-Not yet verified on a Mac. First run there:
+Now verified on a Mac:
 
 1. Set up as above, run `pytest` (the tests don't need Live).
 2. Run `install.py` and confirm the script lands in `~/Music/Ableton/User Library/Remote Scripts/LivePilot`.
